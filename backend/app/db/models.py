@@ -1,7 +1,7 @@
 """SQLAlchemy models. Images live on disk; the database stores only keys and metadata.
 
-Tables: reference_images, inspections, inspection_images, detections, findings.
-Matching candidates stay as JSON on `inspections.comparison`. Validated findings are rows.
+Tables: reference_images, inspections, inspection_images.
+The text review (damage, missing, new) is JSON on `inspections.comparison`.
 """
 
 import uuid
@@ -9,9 +9,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
-    Boolean,
     DateTime,
-    Float,
     ForeignKey,
     Index,
     Integer,
@@ -84,13 +82,9 @@ class Inspection(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
-    # Model names / versions / thresholds used, so results are reproducible and auditable.
-    yolo_model: Mapped[str] = mapped_column(String(255), nullable=False)
-    yolo_conf_threshold: Mapped[float] = mapped_column(Float, nullable=False)
-    yolo_iou_threshold: Mapped[float] = mapped_column(Float, nullable=False)
-    matching_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
-
-    # Matching-stage output (summary, object matches, candidate differences) as JSON.
+    # semantic | boxes. Chosen when the inspection is created.
+    review_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="semantic")
+    # OpenAI review: damage, missing, new, and optional boxes.
     comparison: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -110,7 +104,7 @@ class InspectionImage(Base):
     inspection_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("inspections.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    # Stable id used in API responses and detection ids: ref_1, ref_2, ..., new_1, new_2, ...
+    # URL key only: ref_1, ref_2, ..., new_1, new_2, ... The model is not asked to use these.
     image_ref: Mapped[str] = mapped_column(String(16), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)  # reference | inspection
     position: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -124,48 +118,3 @@ class InspectionImage(Base):
     height: Mapped[int] = mapped_column(Integer, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-
-
-class DetectionRecord(Base):
-    __tablename__ = "detections"
-    __table_args__ = (UniqueConstraint("inspection_image_id", "detection_ref"),)
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    inspection_image_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("inspection_images.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    # Unique within the inspection, e.g. "ref_1_det_001" / "new_2_det_003".
-    detection_ref: Mapped[str] = mapped_column(String(32), nullable=False)
-    label: Mapped[str] = mapped_column(String(64), nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    # [x1, y1, x2, y2] in original-image pixels.
-    x1: Mapped[float] = mapped_column(Float, nullable=False)
-    y1: Mapped[float] = mapped_column(Float, nullable=False)
-    x2: Mapped[float] = mapped_column(Float, nullable=False)
-    y2: Mapped[float] = mapped_column(Float, nullable=False)
-
-
-class FindingRecord(Base):
-    __tablename__ = "findings"
-    __table_args__ = (UniqueConstraint("inspection_id", "finding_ref"),)
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    inspection_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("inspections.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    finding_ref: Mapped[str] = mapped_column(String(64), nullable=False)
-    kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    label: Mapped[str] = mapped_column(String(80), nullable=False)
-    source: Mapped[str] = mapped_column(String(16), nullable=False)
-    before_image_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    after_image_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    before_detection_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    after_detection_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    region: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    evidence_strength: Mapped[str] = mapped_column(String(8), nullable=False)
-    requires_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    explanation: Mapped[str] = mapped_column(String(1000), nullable=False)
-    evidence: Mapped[list[str]] = mapped_column(JSON, nullable=False)

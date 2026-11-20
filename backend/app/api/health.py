@@ -18,7 +18,6 @@ class HealthResponse(BaseModel):
     timestamp: datetime
     openai_configured: bool
     openai_model: str
-    yolo_model_path: str
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -33,5 +32,4 @@ def health() -> HealthResponse:
         timestamp=datetime.now(timezone.utc),
         openai_configured=settings.openai_configured,
         openai_model=settings.openai_model,
-        yolo_model_path=settings.yolo_model_path,
     )

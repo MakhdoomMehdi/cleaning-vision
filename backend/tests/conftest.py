@@ -7,12 +7,10 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.api.deps import get_detection_service, get_image_service, get_storage, get_vision_provider
+from app.api.deps import get_image_service, get_storage, get_vision_provider
 from app.core import config
 from app.db.session import reset_db_caches
 from app.main import create_app
-from app.providers.yolo_provider import DetectionProviderError, RawDetection
-from app.services.detection_service import DetectionService
 from app.services.image_service import ImageService
 
 
@@ -36,25 +34,6 @@ def make_image_bytes(
         kwargs["exif"] = exif
     image.save(buffer, format=fmt, **kwargs)
     return buffer.getvalue()
-
-
-class FakeProvider:
-    """Deterministic stand-in for the YOLO provider."""
-
-    model_name = "fake-yolo.pt"
-    device = "cpu"
-    class_names = ["chair", "couch", "tv"]
-
-    def __init__(self, detections: list[RawDetection] | None = None, fail: bool = False) -> None:
-        self.detections = detections or []
-        self.fail = fail
-        self.calls: list[tuple[float, float]] = []
-
-    def detect(self, image: Image.Image, conf_threshold: float, iou_threshold: float):
-        self.calls.append((conf_threshold, iou_threshold))
-        if self.fail:
-            raise DetectionProviderError("YOLO inference failed.")
-        return list(self.detections)
 
 
 def _clear_caches() -> None:
@@ -81,15 +60,8 @@ def image_service() -> ImageService:
 
 
 @pytest.fixture
-def fake_provider() -> FakeProvider:
-    return FakeProvider()
-
-
-@pytest.fixture
-def client(image_service: ImageService, fake_provider: FakeProvider) -> Iterator[TestClient]:
+def client(image_service: ImageService) -> Iterator[TestClient]:
     app = create_app()
-    service = DetectionService(fake_provider, default_conf_threshold=0.25, default_iou_threshold=0.45)
     app.dependency_overrides[get_image_service] = lambda: image_service
-    app.dependency_overrides[get_detection_service] = lambda: service
     with TestClient(app) as test_client:
         yield test_client

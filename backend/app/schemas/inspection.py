@@ -4,14 +4,24 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.schemas.comparison import ComparisonSummary, ObjectMatch
-from app.schemas.detection import Detection
-from app.schemas.finding import CandidateDifference, Finding, InspectionDecision, VisionStatus
 from app.schemas.reference import LocationType
 
 
 class InspectionStatus(StrEnum):
     PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class InspectionDecision(StrEnum):
+    NO_ISSUE_DETECTED = "no_issue_detected"
+    POTENTIAL_ISSUES = "potential_issues"
+    INCONCLUSIVE = "inconclusive"
+    MANUAL_REVIEW_REQUIRED = "manual_review_required"
+
+
+class VisionStatus(StrEnum):
+    SKIPPED = "skipped"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -25,15 +35,24 @@ class InspectionSummary(BaseModel):
     completed_at: datetime | None = None
     reference_image_count: int
     inspection_image_count: int
-    # None until the comparison has completed.
-    coverage: Literal["full", "partial", "insufficient"] | None = None
-    candidate_count: int | None = None
-    finding_count: int | None = None
+    change_count: int | None = None
     decision: InspectionDecision | None = None
 
 
+class ChangeBox(BaseModel):
+    """A described change, placed on one photo. Coordinates are fractions of that photo."""
+
+    image_id: str
+    kind: Literal["damage", "missing", "new"]
+    description: str
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+
 class InspectionImageOut(BaseModel):
-    """`image_id` is stable within the inspection: ref_1.. for references, new_1.. for uploads."""
+    """`image_id` is only a URL key: ref_1.. for saved photos, new_1.. for the upload."""
 
     image_id: str
     role: Literal["reference", "inspection"]
@@ -43,37 +62,15 @@ class InspectionImageOut(BaseModel):
     image_url: str
 
 
-class InspectionImageResult(InspectionImageOut):
-    detections: list[Detection] = Field(default_factory=list)
-
-
-class DetectorRunInfo(BaseModel):
-    """The detector configuration that produced this inspection's detections."""
-
-    name: str
-    conf_threshold: float
-    iou_threshold: float
-
-
-class InspectionModels(BaseModel):
-    detector: DetectorRunInfo
-    matching_version: str | None = None
-    vision_model: str | None = None
-
-
 class InspectionDetail(InspectionSummary):
     failed_stage: str | None = None
     error_message: str | None = None
-    models: InspectionModels
+    vision_model: str | None = None
     images: list[InspectionImageOut]
 
 
 class InspectionResults(BaseModel):
-    """Everything produced so far for an inspection.
-
-    `candidates` are leads for review from the deterministic matching stage, not verified
-    findings. A final decision is produced by later stages (OpenAI comparison + validation).
-    """
+    """Damage, missing items, and new items. Boxes are included only for box mode."""
 
     inspection_id: str
     property_id: str
@@ -81,13 +78,14 @@ class InspectionResults(BaseModel):
     status: InspectionStatus
     failed_stage: str | None = None
     error_message: str | None = None
-    models: InspectionModels
-    images: list[InspectionImageResult]
-    # None unless the inspection completed.
-    comparison: ComparisonSummary | None = None
-    matches: list[ObjectMatch] = Field(default_factory=list)
-    candidates: list[CandidateDifference] = Field(default_factory=list)
-    findings: list[Finding] = Field(default_factory=list)
+    mode: Literal["semantic", "boxes"] = "semantic"
+    images: list[InspectionImageOut]
+    damage: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    new: list[str] = Field(default_factory=list)
+    boxes: list[ChangeBox] = Field(default_factory=list)
+    summary: str | None = None
+    views_compared: str | None = None
     decision: InspectionDecision | None = None
     vision_status: VisionStatus | None = None
     vision_error: str | None = None

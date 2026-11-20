@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import DetectionPanel from "../components/DetectionPanel";
 import InspectionResultView from "../components/InspectionResultView";
 import InspectionUpload from "../components/InspectionUpload";
 import LocationSelector from "../components/LocationSelector";
@@ -89,7 +88,7 @@ export default function Dashboard() {
             <dt className="text-neutral-500">Status</dt>
             <dd className="font-medium text-green-700">{health.data.status}</dd>
             <dt className="text-neutral-500">OpenAI key configured</dt>
-            <dd>{health.data.openai_configured ? "yes" : "no — damage/stains disabled"}</dd>
+            <dd>{health.data.openai_configured ? "yes" : "no — comparison disabled"}</dd>
             <dt className="text-neutral-500">OpenAI model</dt>
             <dd>{health.data.openai_model}</dd>
           </dl>
@@ -154,8 +153,8 @@ export default function Dashboard() {
                   }}
                 >
                   {new Date(item.created_at).toLocaleString()} — {item.status}
-                  {item.decision ? ` — ${item.decision}` : ""}
-                  {item.finding_count != null ? ` (${item.finding_count} findings)` : ""}
+                  {item.decision ? ` — ${item.decision.split("_").join(" ")}` : ""}
+                  {item.change_count != null ? ` (${item.change_count} changes)` : ""}
                 </button>
               </li>
             ))}
@@ -163,14 +162,6 @@ export default function Dashboard() {
         </Card>
       )}
 
-      <details className="rounded-lg border border-neutral-200 bg-white p-4">
-        <summary className="cursor-pointer text-sm font-semibold uppercase tracking-wide text-neutral-500">
-          Debug: single-image YOLO (does not compare before/after)
-        </summary>
-        <div className="mt-3">
-          <DetectionPanel />
-        </div>
-      </details>
     </main>
   );
 }

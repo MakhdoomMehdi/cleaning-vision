@@ -1,5 +1,3 @@
-import type { BBox, Detection } from "./detection";
-
 export type InspectionStatus = "processing" | "completed" | "failed";
 
 export type InspectionDecision =
@@ -10,37 +8,16 @@ export type InspectionDecision =
 
 export type VisionStatus = "skipped" | "completed" | "failed";
 
-export type FindingKind =
-  | "possible_missing"
-  | "possible_moved"
-  | "possible_new"
-  | "possible_damage"
-  | "possible_debris"
-  | "possible_stain"
-  | "not_visible"
-  | "possibly_occluded"
-  | "inconclusive";
+export type ReviewMode = "semantic" | "boxes";
 
-export interface ApproximateRegion {
+export interface ChangeBox {
   image_id: string;
-  bbox: BBox;
-  approximate: true;
-}
-
-export interface Finding {
-  id: string;
-  kind: FindingKind;
-  label: string;
-  source: "matcher" | "vision" | "both";
-  before_image_id: string | null;
-  after_image_id: string | null;
-  before_detection_id: string | null;
-  after_detection_id: string | null;
-  region: ApproximateRegion | null;
-  evidence_strength: "low" | "medium";
-  requires_review: boolean;
-  explanation: string;
-  evidence: string[];
+  kind: "damage" | "missing" | "new";
+  description: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
 }
 
 export interface InspectionImageResult {
@@ -50,15 +27,6 @@ export interface InspectionImageResult {
   width: number;
   height: number;
   image_url: string;
-  detections: Detection[];
-}
-
-export interface ComparisonSummary {
-  valid: boolean;
-  coverage: "full" | "partial" | "insufficient";
-  needs_additional_image: boolean;
-  recommendation: string | null;
-  quality_issues: string[];
 }
 
 export interface InspectionResults {
@@ -68,9 +36,14 @@ export interface InspectionResults {
   status: InspectionStatus;
   failed_stage: string | null;
   error_message: string | null;
+  mode: ReviewMode;
   images: InspectionImageResult[];
-  comparison: ComparisonSummary | null;
-  findings: Finding[];
+  damage: string[];
+  missing: string[];
+  new: string[];
+  boxes: ChangeBox[];
+  summary: string | null;
+  views_compared: string | null;
   decision: InspectionDecision | null;
   vision_status: VisionStatus | null;
   vision_error: string | null;
@@ -84,21 +57,10 @@ export interface InspectionSummary {
   status: InspectionStatus;
   created_at: string;
   decision: InspectionDecision | null;
-  finding_count: number | null;
-  coverage: "full" | "partial" | "insufficient" | null;
+  change_count: number | null;
 }
 
 export interface InspectionListResponse {
   items: InspectionSummary[];
   total: number;
-}
-
-export type IssueTone = "missing" | "new" | "damage" | "moved" | "other";
-
-export interface IssueMark {
-  id: string;
-  label: string;
-  bbox: BBox;
-  tone: IssueTone;
-  approximate?: boolean;
 }

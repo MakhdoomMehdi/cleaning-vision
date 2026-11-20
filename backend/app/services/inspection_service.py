@@ -1,47 +1,44 @@
-"""Inspection orchestration: a deterministic, synchronous pipeline.
+"""Inspection orchestration: a synchronous text comparison.
 
-    validate uploads -> store + persist inputs -> load images -> YOLO detection (all images)
-      -> viewpoint assessment + conservative matching -> persist results
+    validate uploads -> store + persist inputs -> load the before pool and the after photo
+      -> one OpenAI review -> store the text report
 
-Each stage that can fail records *which* stage failed on the inspection (status "failed"); no
-stage is silently skipped. Processing is synchronous, so an inspection is never left "queued".
+Each stage that can fail records *which* stage failed. Processing is synchronous, so an
+inspection is never left "queued".
 """
 
 import hashlib
 import logging
 from datetime import datetime, timezone
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.db.models import DetectionRecord, FindingRecord, Inspection, InspectionImage, ReferenceImage
-from app.providers.openai_provider import OpenAIVisionProvider, PairImages, VisionProviderError
-from app.providers.yolo_provider import DetectionProviderError
-from app.schemas.comparison import ComparisonResult
-from app.schemas.detection import Detection, ImageDetections
-from app.schemas.finding import Finding, InspectionDecision, VisionStatus
+from app.db.models import Inspection, InspectionImage, ReferenceImage
+from app.providers.openai_provider import ReviewImage, VisionProviderError, VisionReviewer
 from app.schemas.inspection import (
-    DetectorRunInfo,
+    ChangeBox,
+    InspectionDecision,
     InspectionDetail,
     InspectionImageOut,
-    InspectionImageResult,
-    InspectionModels,
     InspectionResults,
     InspectionStatus,
     InspectionSummary,
+    VisionStatus,
 )
 from app.schemas.reference import LocationType
-from app.services.detection_service import DetectionService
+from app.schemas.review import ChangeMark, ReviewMode, RoomReview
 from app.services.image_service import ImageService, ImageValidationError, ValidatedImage
-from app.services.matching_service import ComparisonImage, MatchingService
 from app.services.reference_service import ReferenceService
 from app.services.uploads import UploadedFile, prepare_uploads
-from app.services.validation_service import ValidationService
 from app.storage.base import ImageStorage, StorageError
 
 logger = logging.getLogger(__name__)
 
 INSPECTION_CATEGORY = "inspections"
+_PHRASE_LIMIT = 12
+_PHRASE_CHARS = 300
 
 
 class InspectionError(Exception):
@@ -60,23 +57,122 @@ class InspectionNotFoundError(InspectionError):
     pass
 
 
-def qualify_detections(result: ImageDetections, image_ref: str) -> ImageDetections:
-    """Make detection ids unique across the inspection: det_001 -> ref_1_det_001."""
-    return ImageDetections(
-        image_id=image_ref,
-        width=result.width,
-        height=result.height,
-        detections=[
-            Detection(id=f"{image_ref}_{d.id}", label=d.label, confidence=d.confidence, bbox=d.bbox)
-            for d in result.detections
-        ],
+class VisionUnavailable(Exception):
+    """Comparison was requested without an OpenAI API key."""
+
+
+def _phrases(items: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for item in items:
+        text = " ".join(item.split())
+        if text:
+            cleaned.append(text[:_PHRASE_CHARS])
+        if len(cleaned) == _PHRASE_LIMIT:
+            break
+    return cleaned
+
+
+def _clean_mark(mark: ChangeMark, before_count: int, after_count: int) -> ChangeMark | None:
+    description = " ".join(mark.description.split())[:_PHRASE_CHARS]
+    if not description:
+        return None
+    limit = before_count if mark.side == "before" else after_count
+    if mark.photo_number < 1 or mark.photo_number > limit:
+        return None
+    x1, x2 = sorted((mark.x1, mark.x2))
+    y1, y2 = sorted((mark.y1, mark.y2))
+    if x2 - x1 < 0.01 or y2 - y1 < 0.01:
+        return None
+    return ChangeMark(
+        kind=mark.kind,
+        description=description,
+        side=mark.side,
+        photo_number=mark.photo_number,
+        x1=x1,
+        y1=y1,
+        x2=x2,
+        y2=y2,
     )
+
+
+def normalize_review(
+    report: RoomReview, mode: ReviewMode, before_count: int, after_count: int
+) -> RoomReview:
+    summary = " ".join(report.summary.split())[:1000]
+    views = " ".join(report.views_compared.split())[:500]
+    if not report.could_compare:
+        return RoomReview(
+            mode=mode, summary=summary, views_compared=views, could_compare=False
+        )
+    if mode == ReviewMode.SEMANTIC:
+        return RoomReview(
+            mode=mode,
+            damage=_phrases(report.damage),
+            missing=_phrases(report.missing),
+            new=_phrases(report.new),
+            summary=summary,
+            views_compared=views,
+            could_compare=True,
+        )
+    marks: list[ChangeMark] = []
+    for mark in report.marks:
+        cleaned = _clean_mark(mark, before_count, after_count)
+        if cleaned is not None:
+            marks.append(cleaned)
+        if len(marks) == _PHRASE_LIMIT:
+            break
+    return RoomReview(
+        mode=mode,
+        damage=_phrases([mark.description for mark in marks if mark.kind == "damage"]),
+        missing=_phrases([mark.description for mark in marks if mark.kind == "missing"]),
+        new=_phrases([mark.description for mark in marks if mark.kind == "new"]),
+        marks=marks,
+        summary=summary,
+        views_compared=views,
+        could_compare=True,
+    )
+
+
+def _boxes(report: RoomReview) -> list[ChangeBox]:
+    if report.mode != ReviewMode.BOXES:
+        return []
+    return [
+        ChangeBox(
+            image_id=f"{'ref' if mark.side == 'before' else 'new'}_{mark.photo_number}",
+            kind=mark.kind,
+            description=mark.description,
+            x1=mark.x1,
+            y1=mark.y1,
+            x2=mark.x2,
+            y2=mark.y2,
+        )
+        for mark in report.marks
+    ]
+
+
+def decide(report: RoomReview) -> InspectionDecision:
+    if not report.could_compare:
+        return InspectionDecision.INCONCLUSIVE
+    if report.damage or report.missing or report.new:
+        return InspectionDecision.POTENTIAL_ISSUES
+    return InspectionDecision.NO_ISSUE_DETECTED
+
+
+def load_report(payload: dict | None) -> RoomReview | None:
+    if not payload:
+        return None
+    try:
+        return RoomReview.model_validate(payload)
+    except ValidationError:
+        return None
 
 
 def _failure_message(exc: Exception, stage: str) -> str:
     """User-safe description; the full exception is logged server-side only."""
-    if isinstance(exc, DetectionProviderError):
-        return "Object detection failed or the detector model is unavailable."
+    if isinstance(exc, VisionUnavailable):
+        return "OPENAI_API_KEY is not set, so the photos could not be compared."
+    if isinstance(exc, VisionProviderError):
+        return "The photos could not be compared."
     if isinstance(exc, StorageError):
         return "A stored image could not be read."
     if isinstance(exc, ImageValidationError):
@@ -91,30 +187,26 @@ class InspectionService:
         storage: ImageStorage,
         images: ImageService,
         references: ReferenceService,
-        detector: DetectionService,
-        matcher: MatchingService,
         max_reference_images: int,
-        vision: OpenAIVisionProvider | None = None,
-        validator: ValidationService | None = None,
+        vision: VisionReviewer | None = None,
     ) -> None:
         self._db = db
         self._storage = storage
         self._images = images
         self._references = references
-        self._detector = detector
-        self._matcher = matcher
         self._max_reference_images = max_reference_images
         self._vision = vision
-        self._validator = validator or ValidationService()
 
     @property
     def max_upload_bytes(self) -> int:
         return self._images.max_upload_bytes
 
-    # ------------------------------------------------------------------ create
-
     def create(
-        self, property_id: str, location: LocationType, files: list[UploadedFile]
+        self,
+        property_id: str,
+        location: LocationType,
+        files: list[UploadedFile],
+        mode: ReviewMode = ReviewMode.SEMANTIC,
     ) -> Inspection:
         refs = self._references.list_references(property_id, location)
         if not refs:
@@ -128,22 +220,19 @@ class InspectionService:
                 f"{self._max_reference_images} can be compared in one inspection."
             )
 
-        prepared = prepare_uploads(self._images, files)  # all-or-nothing validation
-        inspection = self._persist_inputs(property_id, location, refs, prepared)
+        prepared = prepare_uploads(self._images, files)
+        inspection = self._persist_inputs(property_id, location, refs, prepared, mode)
         self._run_pipeline(inspection.id)
         return self._db.get_one(Inspection, inspection.id)
 
-    def _persist_inputs(self, property_id, location, refs, prepared) -> Inspection:  # type: ignore[no-untyped-def]
-        info = self._detector.model_info()
+    def _persist_inputs(self, property_id, location, refs, prepared, mode: ReviewMode) -> Inspection:  # type: ignore[no-untyped-def]
         saved_keys: list[str] = []
         try:
             inspection = Inspection(
                 property_id=property_id,
                 location=location.value,
                 status=InspectionStatus.PROCESSING.value,
-                yolo_model=info.name,
-                yolo_conf_threshold=info.conf_threshold,
-                yolo_iou_threshold=info.iou_threshold,
+                review_mode=mode.value,
             )
             self._db.add(inspection)
             self._db.flush()
@@ -192,8 +281,6 @@ class InspectionService:
             raise
         return inspection
 
-    # ------------------------------------------------------------------ pipeline
-
     def _run_pipeline(self, inspection_id: str) -> None:
         stage = "load_images"
         loaded: dict[str, ValidatedImage] = {}
@@ -202,92 +289,41 @@ class InspectionService:
             for row in rows:
                 loaded[row.image_ref] = self._images.validate(self._storage.read(self._key_for(row)))
 
-            stage = "detect_objects"
-            detections: dict[str, ImageDetections] = {}
-            for row in rows:
-                result = self._detector.detect(loaded[row.image_ref], image_id=row.image_ref)
-                qualified = qualify_detections(result, row.image_ref)
-                detections[row.image_ref] = qualified
-                for det in qualified.detections:
-                    self._db.add(
-                        DetectionRecord(
-                            inspection_image_id=row.id,
-                            detection_ref=det.id,
-                            label=det.label,
-                            confidence=det.confidence,
-                            x1=det.bbox[0],
-                            y1=det.bbox[1],
-                            x2=det.bbox[2],
-                            y2=det.bbox[3],
-                        )
-                    )
-            self._db.commit()  # keep detections even if a later stage fails
-
-            stage = "compare_images"
-            comparison = self._matcher.compare(
-                references=[
-                    ComparisonImage(r.image_ref, loaded[r.image_ref].image, detections[r.image_ref])
-                    for r in rows
-                    if r.role == "reference"
-                ],
-                inspections=[
-                    ComparisonImage(r.image_ref, loaded[r.image_ref].image, detections[r.image_ref])
-                    for r in rows
-                    if r.role == "inspection"
-                ],
-            )
-
-            stage = "vision_compare"
-            vision_status = VisionStatus.SKIPPED
-            vision_error: str | None = None
-            vision_model: str | None = None
-            vision_output = None
+            stage = "review"
             if self._vision is None:
-                vision_error = "OPENAI_API_KEY is not set; stains, debris and damage were not assessed."
-            else:
-                vision_model = self._vision.model_name
-                try:
-                    vision_output = self._vision.compare(
-                        pairs=self._vision_pairs(comparison, loaded),
-                        summary=comparison.summary,
-                        candidates=comparison.candidates,
-                        known_detection_ids=[
-                            d.id for result in detections.values() for d in result.detections
-                        ],
-                    )
-                    vision_status = VisionStatus.COMPLETED
-                except VisionProviderError:
-                    logger.exception("Inspection %s vision stage failed", inspection_id)
-                    vision_status = VisionStatus.FAILED
-                    vision_error = "The vision model could not analyse the images."
-
-            stage = "validate_findings"
-            sizes = {ref: (item.width, item.height) for ref, item in loaded.items()}
-            known_ids = {d.id for result in detections.values() for d in result.detections}
-            findings, decision, _note = self._validator.validate(
-                comparison, vision_output, vision_status, sizes, known_ids
-            )
-
-            stage = "save_results"
+                raise VisionUnavailable()
+            before = [
+                ReviewImage(caption=f"Before photo {index}", image=loaded[row.image_ref].image)
+                for index, row in enumerate((r for r in rows if r.role == "reference"), start=1)
+            ]
+            after = [
+                ReviewImage(caption=f"After photo {index}", image=loaded[row.image_ref].image)
+                for index, row in enumerate((r for r in rows if r.role == "inspection"), start=1)
+            ]
             inspection = self._db.get_one(Inspection, inspection_id)
-            inspection.comparison = comparison.model_dump(mode="json")
-            inspection.matching_version = comparison.matching_version
+            mode = ReviewMode(inspection.review_mode)
+            report = normalize_review(
+                self._vision.review(before, after, mode),
+                mode,
+                before_count=len(before),
+                after_count=len(after),
+            )
+            decision = decide(report)
+            inspection.comparison = report.model_dump(mode="json")
             inspection.decision = decision.value
-            inspection.vision_status = vision_status.value
-            inspection.vision_model = vision_model
-            inspection.vision_error = vision_error
+            inspection.vision_status = VisionStatus.COMPLETED.value
+            inspection.vision_model = self._vision.model_name
+            inspection.vision_error = None
             inspection.status = InspectionStatus.COMPLETED.value
             inspection.completed_at = datetime.now(timezone.utc)
-            self._store_findings(inspection_id, findings)
             self._db.commit()
             logger.info(
-                "Inspection %s completed: coverage=%s candidates=%d findings=%d decision=%s vision=%s",
+                "Inspection %s completed: decision=%s damage=%d missing=%d new=%d",
                 inspection_id,
-                comparison.summary.coverage,
-                len(comparison.candidates),
-                len(findings),
                 decision.value,
-                vision_status.value,
+                len(report.damage),
+                len(report.missing),
+                len(report.new),
             )
         except Exception as exc:
             logger.exception("Inspection %s failed during stage %s", inspection_id, stage)
@@ -302,6 +338,13 @@ class InspectionService:
         inspection.status = InspectionStatus.FAILED.value
         inspection.failed_stage = stage
         inspection.error_message = message
+        inspection.vision_status = (
+            VisionStatus.SKIPPED.value if stage == "review" and self._vision is None else inspection.vision_status
+        )
+        if stage == "review" and self._vision is not None:
+            inspection.vision_status = VisionStatus.FAILED.value
+            inspection.vision_model = self._vision.model_name
+            inspection.vision_error = message
         inspection.completed_at = datetime.now(timezone.utc)
         self._db.commit()
 
@@ -309,101 +352,15 @@ class InspectionService:
         stmt = (
             select(InspectionImage)
             .where(InspectionImage.inspection_id == inspection_id)
-            .order_by(InspectionImage.role.desc(), InspectionImage.position)  # reference first
+            .order_by(InspectionImage.role.desc(), InspectionImage.position)
         )
         return list(self._db.scalars(stmt))
-
-    def _vision_pairs(self, comparison: ComparisonResult, loaded: dict[str, ValidatedImage]) -> list[PairImages]:
-        ranked = sorted(
-            (pair for pair in comparison.summary.pairs if pair.reliable),
-            key=lambda pair: pair.inliers,
-            reverse=True,
-        )
-        selected = ranked[:3]
-        if not selected:
-            refs = [key for key in loaded if key.startswith("ref_")]
-            news = [key for key in loaded if key.startswith("new_")]
-            if refs and news:
-                return [
-                    PairImages(
-                        reference_image_id=refs[0],
-                        inspection_image_id=news[0],
-                        reference=loaded[refs[0]].image,
-                        inspection=loaded[news[0]].image,
-                    )
-                ]
-            return []
-        return [
-            PairImages(
-                reference_image_id=pair.reference_image_id,
-                inspection_image_id=pair.inspection_image_id,
-                reference=loaded[pair.reference_image_id].image,
-                inspection=loaded[pair.inspection_image_id].image,
-            )
-            for pair in selected
-        ]
-
-    def _store_findings(self, inspection_id: str, findings: list[Finding]) -> None:
-        for finding in findings:
-            self._db.add(
-                FindingRecord(
-                    inspection_id=inspection_id,
-                    finding_ref=finding.id,
-                    kind=finding.kind.value,
-                    label=finding.label,
-                    source=finding.source,
-                    before_image_id=finding.before_image_id,
-                    after_image_id=finding.after_image_id,
-                    before_detection_id=finding.before_detection_id,
-                    after_detection_id=finding.after_detection_id,
-                    region=finding.region.model_dump(mode="json") if finding.region else None,
-                    evidence_strength=finding.evidence_strength,
-                    requires_review=finding.requires_review,
-                    explanation=finding.explanation[:1000],
-                    evidence=finding.evidence,
-                )
-            )
-
-    def _load_findings(self, inspection_id: str) -> list[Finding]:
-        rows = self._db.scalars(
-            select(FindingRecord)
-            .where(FindingRecord.inspection_id == inspection_id)
-            .order_by(FindingRecord.finding_ref)
-        )
-        findings: list[Finding] = []
-        for row in rows:
-            findings.append(
-                Finding(
-                    id=row.finding_ref,
-                    kind=row.kind,  # type: ignore[arg-type]
-                    label=row.label,
-                    source=row.source,  # type: ignore[arg-type]
-                    before_image_id=row.before_image_id,
-                    after_image_id=row.after_image_id,
-                    before_detection_id=row.before_detection_id,
-                    after_detection_id=row.after_detection_id,
-                    region=row.region,
-                    evidence_strength=row.evidence_strength,  # type: ignore[arg-type]
-                    requires_review=row.requires_review,
-                    explanation=row.explanation,
-                    evidence=row.evidence or [],
-                )
-            )
-        return findings
-
-    @staticmethod
-    def _note_for(decision: InspectionDecision | None, vision_status: VisionStatus | None) -> str | None:
-        if decision is None:
-            return None
-        return ValidationService._note(decision, vision_status or VisionStatus.SKIPPED)
 
     def _key_for(self, row: InspectionImage) -> str:
         if row.storage_key is not None:
             return row.storage_key
         assert row.reference_image_id is not None
         return self._db.get_one(ReferenceImage, row.reference_image_id).storage_key
-
-    # ------------------------------------------------------------------ queries
 
     def get(self, inspection_id: str) -> Inspection:
         row = self._db.get(Inspection, inspection_id)
@@ -449,8 +406,6 @@ class InspectionService:
             logger.error("Image %s of inspection %s is not readable", image_ref, inspection_id)
             raise InspectionNotFoundError(f"{inspection_id}/{image_ref}") from None
 
-    # ------------------------------------------------------------------ schema builders
-
     def summaries(self, rows: list[Inspection]) -> list[InspectionSummary]:
         counts: dict[tuple[str, str], int] = {}
         if rows:
@@ -460,25 +415,14 @@ class InspectionService:
                 .group_by(InspectionImage.inspection_id, InspectionImage.role)
             )
             counts = {(i, role): n for i, role, n in self._db.execute(stmt)}
-        finding_counts: dict[str, int] = {}
-        if rows:
-            finding_counts = {
-                inspection_id: count
-                for inspection_id, count in self._db.execute(
-                    select(FindingRecord.inspection_id, func.count())
-                    .where(FindingRecord.inspection_id.in_([r.id for r in rows]))
-                    .group_by(FindingRecord.inspection_id)
-                ).all()
-            }
-        return [self._summary(row, counts, finding_counts) for row in rows]
+        return [self._summary(row, counts) for row in rows]
 
     @staticmethod
-    def _summary(
-        row: Inspection,
-        counts: dict[tuple[str, str], int],
-        finding_counts: dict[str, int],
-    ) -> InspectionSummary:
-        comparison = row.comparison or {}
+    def _summary(row: Inspection, counts: dict[tuple[str, str], int]) -> InspectionSummary:
+        report = load_report(row.comparison)
+        change_count = None
+        if report is not None:
+            change_count = len(report.damage) + len(report.missing) + len(report.new)
         return InspectionSummary(
             id=row.id,
             property_id=row.property_id,
@@ -488,22 +432,8 @@ class InspectionService:
             completed_at=row.completed_at,
             reference_image_count=counts.get((row.id, "reference"), 0),
             inspection_image_count=counts.get((row.id, "inspection"), 0),
-            coverage=(comparison.get("summary") or {}).get("coverage"),
-            candidate_count=len(comparison["candidates"]) if "candidates" in comparison else None,
-            finding_count=finding_counts.get(row.id) if row.comparison is not None else None,
+            change_count=change_count,
             decision=InspectionDecision(row.decision) if row.decision else None,
-        )
-
-    @staticmethod
-    def _models(row: Inspection) -> InspectionModels:
-        return InspectionModels(
-            detector=DetectorRunInfo(
-                name=row.yolo_model,
-                conf_threshold=row.yolo_conf_threshold,
-                iou_threshold=row.yolo_iou_threshold,
-            ),
-            matching_version=row.matching_version,
-            vision_model=row.vision_model,
         )
 
     @staticmethod
@@ -519,45 +449,27 @@ class InspectionService:
 
     def detail(self, row: Inspection) -> InspectionDetail:
         summary = self.summaries([row])[0]
-        images = [
-            InspectionImageOut(**self._image_out(row.id, img)) for img in self._image_rows(row.id)
-        ]
+        images = [InspectionImageOut(**self._image_out(row.id, img)) for img in self._image_rows(row.id)]
         return InspectionDetail(
             **summary.model_dump(),
             failed_stage=row.failed_stage,
             error_message=row.error_message,
-            models=self._models(row),
+            vision_model=row.vision_model,
             images=images,
         )
 
     def results(self, row: Inspection) -> InspectionResults:
-        image_rows = self._image_rows(row.id)
-        by_image: dict[str, list[Detection]] = {img.id: [] for img in image_rows}
-        records = self._db.scalars(
-            select(DetectionRecord)
-            .where(DetectionRecord.inspection_image_id.in_(list(by_image)))
-            .order_by(DetectionRecord.detection_ref)
-        )
-        for rec in records:
-            by_image[rec.inspection_image_id].append(
-                Detection(
-                    id=rec.detection_ref,
-                    label=rec.label,
-                    confidence=rec.confidence,
-                    bbox=(rec.x1, rec.y1, rec.x2, rec.y2),
-                )
+        report = load_report(row.comparison)
+        summary = self.summaries([row])[0]
+        note = None
+        if row.decision == InspectionDecision.NO_ISSUE_DETECTED.value and not (report and report.summary):
+            note = (
+                "No damage, missing items, or new items were reported in the photos that could be "
+                "compared. This is not a certification that the room is clean."
             )
-
-        images = [
-            InspectionImageResult(**self._image_out(row.id, img), detections=by_image[img.id])
-            for img in image_rows
-        ]
-        comparison = ComparisonResult.model_validate(row.comparison) if row.comparison else None
-        findings = self._load_findings(row.id)
-        if not findings and comparison is not None:
-            findings = [self._validator._from_candidate(c) for c in comparison.candidates]
-        decision = InspectionDecision(row.decision) if row.decision else None
-        vision_status = VisionStatus(row.vision_status) if row.vision_status else None
+        elif row.decision == InspectionDecision.INCONCLUSIVE.value and not (report and report.summary):
+            note = "These photos do not show the same part of the room clearly enough to compare."
+        mode = report.mode if report is not None else ReviewMode(row.review_mode or "semantic")
         return InspectionResults(
             inspection_id=row.id,
             property_id=row.property_id,
@@ -565,14 +477,16 @@ class InspectionService:
             status=InspectionStatus(row.status),
             failed_stage=row.failed_stage,
             error_message=row.error_message,
-            models=self._models(row),
-            images=images,
-            comparison=comparison.summary if comparison else None,
-            matches=comparison.matches if comparison else [],
-            candidates=comparison.candidates if comparison else [],
-            findings=findings,
-            decision=decision,
-            vision_status=vision_status,
+            mode=mode.value,
+            images=[InspectionImageOut(**self._image_out(row.id, img)) for img in self._image_rows(row.id)],
+            damage=report.damage if report else [],
+            missing=report.missing if report else [],
+            new=report.new if report else [],
+            boxes=_boxes(report) if report else [],
+            summary=report.summary or None if report else None,
+            views_compared=report.views_compared or None if report else None,
+            decision=summary.decision,
+            vision_status=VisionStatus(row.vision_status) if row.vision_status else None,
             vision_error=row.vision_error,
-            note=self._note_for(decision, vision_status),
+            note=note,
         )

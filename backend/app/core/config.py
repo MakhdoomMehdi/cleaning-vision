@@ -37,13 +37,8 @@ class Settings(BaseSettings):
     min_image_dimension: int = Field(default=320, ge=1)
     max_image_dimension: int = Field(default=8000, ge=1)
     max_images_per_request: int = Field(default=6, ge=1)
-    # Reference images compared per inspection. More than this is rejected, never silently dropped.
+    # Before photos sent with one inspection. More than this is rejected, never silently dropped.
     max_reference_images_per_inspection: int = Field(default=12, ge=1)
-
-    yolo_model_path: str = "yolo11n.pt"
-    yolo_conf_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
-    yolo_iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
-    yolo_device: str = "cpu"
 
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.4"

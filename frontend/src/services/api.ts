@@ -1,9 +1,9 @@
-import type { DetectResponse } from "../types/detection";
 import type { HealthResponse } from "../types/health";
 import type {
   InspectionListResponse,
   InspectionResults,
   InspectionSummary,
+  ReviewMode,
 } from "../types/inspection";
 import type { LocationListResponse, ReferenceListResponse } from "../types/reference";
 
@@ -43,12 +43,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-export function detectImage(file: File, signal?: AbortSignal): Promise<DetectResponse> {
-  const form = new FormData();
-  form.append("file", file); // the browser sets the multipart Content-Type boundary
-  return request<DetectResponse>("/api/v1/detect", { method: "POST", body: form, signal });
-}
-
 export function getLocations(signal?: AbortSignal): Promise<LocationListResponse> {
   return request<LocationListResponse>("/api/v1/locations", { signal });
 }
@@ -79,7 +73,6 @@ export function uploadReferences(
   });
 }
 
-/** Absolute URL for an image path returned by the API. */
 export function referenceImageUrl(imagePath: string): string {
   return `${API_BASE_URL}${imagePath}`;
 }
@@ -92,11 +85,13 @@ export function createInspection(
   propertyId: string,
   location: string,
   files: File[],
+  mode: ReviewMode,
   signal?: AbortSignal,
 ): Promise<InspectionSummary> {
   const form = new FormData();
   form.append("property_id", propertyId);
   form.append("location", location);
+  form.append("mode", mode);
   for (const file of files) form.append("files", file);
   return request<InspectionSummary>("/api/v1/inspections", {
     method: "POST",

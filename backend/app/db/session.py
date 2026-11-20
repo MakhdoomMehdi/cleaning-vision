@@ -67,6 +67,7 @@ def init_db() -> None:
     engine = get_engine()
     Base.metadata.create_all(engine)
     _sqlite_add_missing_inspection_columns(engine)
+    _sqlite_drop_retired_inspection_columns(engine)
     logger.info("Database ready")
 
 
@@ -83,11 +84,27 @@ def _sqlite_add_missing_inspection_columns(engine: Engine) -> None:
         "vision_status": "VARCHAR(16)",
         "vision_model": "VARCHAR(64)",
         "vision_error": "VARCHAR(500)",
+        "review_mode": "VARCHAR(16) NOT NULL DEFAULT 'semantic'",
     }
     with engine.begin() as connection:
         for name, coltype in additions.items():
             if name not in existing:
                 connection.execute(text(f"ALTER TABLE inspections ADD COLUMN {name} {coltype}"))
+
+
+def _sqlite_drop_retired_inspection_columns(engine: Engine) -> None:
+    """Drop detector columns left by the previous local-model pipeline."""
+    if engine.dialect.name != "sqlite":
+        return
+    inspector = sa_inspect(engine)
+    if "inspections" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("inspections")}
+    retired = ("yolo_model", "yolo_conf_threshold", "yolo_iou_threshold", "matching_version")
+    with engine.begin() as connection:
+        for name in retired:
+            if name in existing:
+                connection.execute(text(f"ALTER TABLE inspections DROP COLUMN {name}"))
 
 
 def reset_db_caches() -> None:

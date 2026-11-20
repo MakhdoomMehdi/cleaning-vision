@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
     if not settings.openai_configured:
-        logger.warning("OPENAI_API_KEY is not set; OpenAI comparison will be unavailable.")
+        logger.warning("OPENAI_API_KEY is not set; photo comparison will be unavailable.")
     init_db()
     get_storage()  # creates the upload directory up front
     logger.info("%s started (env=%s)", settings.app_name, settings.app_env)

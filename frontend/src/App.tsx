@@ -7,7 +7,7 @@ export default function App() {
         <div className="mx-auto max-w-5xl px-4 py-4">
           <h1 className="text-xl font-semibold">Cleaning Vision AI</h1>
           <p className="mt-1 text-sm text-neutral-600">
-            Save a before photo, upload the after photo, review missing / new / damaged items.
+            Save before photos of a room, upload the after photo, and read what changed.
           </p>
         </div>
       </header>
