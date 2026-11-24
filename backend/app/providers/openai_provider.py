@@ -48,6 +48,14 @@ class BoxedOutput(BaseModel):
     could_compare: bool = True
 
 
+def _sent_size(image: Image.Image) -> tuple[int, int]:
+    width, height = image.size
+    scale = min(1.0, _MAX_SIDE / max(width, height))
+    if scale < 1.0:
+        return max(1, int(width * scale)), max(1, int(height * scale))
+    return width, height
+
+
 def _jpeg_data_url(image: Image.Image, quality: int) -> str:
     rgb = image.convert("RGB")
     width, height = rgb.size
@@ -94,9 +102,14 @@ def _box_instructions() -> str:
         "4. Draw boxes only for objects you marked missing, moved, damaged, or new.\n"
         "Draw every box on the AFTER photo only. side is always 'after'. photo_number is "
         "the AFTER photo number, usually 1.\n"
+        "Measure every box on the AFTER photo. Do not copy a position from the BEFORE photo. "
+        "The camera may have moved, so the same spot is in a different place in the AFTER photo, "
+        "and a copied position lands beside the object.\n"
         "Coordinates are fractions of that AFTER photo: x grows to the right, y grows "
         "downward, 0 is the top-left corner and 1 is the bottom-right. x1,y1 is the "
-        "top-left of the object and x2,y2 is its bottom-right.\n"
+        "top-left corner of the object. x2,y2 is the bottom-right corner, not the width "
+        "and not the height. The center of the box must sit on the object, or on the empty "
+        "patch a missing object covered, not on the surface beside it.\n"
         "For damage, new, and moved, put the edges on the object's own silhouette. A box "
         "that covers the floor, a whole wall, or a lot of empty space around the object is wrong.\n"
         "- damage: one tight box around the scratch, dent, stain, or break\n"
@@ -133,6 +146,22 @@ class MissingOutput(BaseModel):
     marks: list[ChangeMark] = Field(default_factory=list)
 
 
+class PlacedMark(BaseModel):
+    """A corrected box, measured on a 0–1000 grid of the after photo."""
+
+    index: int = Field(ge=1, le=12)
+    x1: int = Field(ge=0, le=1000)
+    y1: int = Field(ge=0, le=1000)
+    x2: int = Field(ge=0, le=1000)
+    y2: int = Field(ge=0, le=1000)
+    origin_x: int | None = Field(default=None, ge=0, le=1000)
+    origin_y: int | None = Field(default=None, ge=0, le=1000)
+
+
+class PlacementOutput(BaseModel):
+    marks: list[PlacedMark] = Field(default_factory=list)
+
+
 _POOL_INTRO = (
     "These BEFORE photos are different angles of the room. "
     "Pick the single BEFORE photo that matches the AFTER photo. "
@@ -149,6 +178,24 @@ _MISSING_INTRO = (
     "Look again for objects that are in the BEFORE photo and gone from the AFTER photo. "
     "Return only missing boxes on the bare spot. If none are gone, return no marks."
 )
+
+
+def _placement_instructions() -> str:
+    return (
+        "You only correct where each box sits. The findings are already decided.\n"
+        "Coordinates are integers from 0 to 1000 on the AFTER photo. 0,0 is its top-left "
+        "pixel and 1000,1000 is its bottom-right pixel. x1,y1 is the top-left corner of "
+        "the object. x2,y2 is the bottom-right corner. They are not the width or the height.\n"
+        "Look at the AFTER photo and cover the object, or the exact empty patch a missing "
+        "object covered. The center of the box must lie on that patch. A box beside it, "
+        "above it, or below it is wrong. A missing handkerchief gets a handkerchief-sized "
+        "box on the patch it covered, not the table around that patch.\n"
+        "The BEFORE photo only shows what the object looked like. Do not reuse its pixel "
+        "position. The camera may have moved.\n"
+        "index is the finding number you were given. For a moved finding, origin_x and "
+        "origin_y are the center of where that object used to be, measured on the AFTER "
+        "photo. Leave them null for every other kind."
+    )
 
 
 class OpenAIVisionProvider:
@@ -177,9 +224,11 @@ class OpenAIVisionProvider:
         matched_photo = self._matched_photo(before, after)
         focused = ReviewImage(caption="Before photo 1", image=before[matched_photo - 1].image)
         report = self._compare_pair(focused, after, matched_photo)
-        if not report.could_compare or any(mark.kind == "missing" for mark in report.marks):
-            return report
-        return self._add_missing_followup(report, focused, after)
+        if report.could_compare and not any(mark.kind == "missing" for mark in report.marks):
+            report = self._add_missing_followup(report, focused, after)
+        if report.could_compare and report.marks:
+            report = self._place_marks(report, focused, after)
+        return report
 
     def _matched_photo(self, before: list[ReviewImage], after: list[ReviewImage]) -> int:
         if len(before) == 1:
@@ -245,6 +294,37 @@ class OpenAIVisionProvider:
             return report
         return _merge_missing(report, parsed.marks)
 
+    def _place_marks(
+        self, report: RoomReview, focused: ReviewImage, after: list[ReviewImage]
+    ) -> RoomReview:
+        width, height = _sent_size(after[0].image)
+        findings = "\n".join(
+            f"{index}. {mark.kind}: {mark.description}"
+            for index, mark in enumerate(report.marks, start=1)
+        )
+        try:
+            parsed = self._parse(
+                instructions=_placement_instructions(),
+                content=_message(
+                    [focused],
+                    after,
+                    intro=(
+                        f"The AFTER photo is {width} by {height} pixels. "
+                        "Place each finding on that photo. The box must cover the object "
+                        "or the empty patch it left, not the area beside it.\n"
+                        f"{findings}"
+                    ),
+                    before_detail="high",
+                    after_detail="high",
+                    quality=90,
+                ),
+                text_format=PlacementOutput,
+            )
+        except VisionProviderError:
+            logger.warning("Box placement failed; keeping the first boxes")
+            return report
+        return _apply_placement(report, parsed.marks)
+
     def _parse(
         self,
         *,
@@ -280,6 +360,26 @@ def _merge_missing(report: RoomReview, extra: list[ChangeMark]) -> RoomReview:
             continue
         marks.append(mark.model_copy(update={"kind": "missing", "description": label}))
         existing.add(label.casefold())
+    return report.model_copy(update={"marks": marks})
+
+
+def _apply_placement(report: RoomReview, placed: list[PlacedMark]) -> RoomReview:
+    marks = list(report.marks)
+    for item in placed:
+        index = item.index - 1
+        if index < 0 or index >= len(marks) or item.x1 == item.x2 or item.y1 == item.y2:
+            continue
+        current = marks[index]
+        update: dict[str, float | None] = {
+            "x1": item.x1 / 1000,
+            "y1": item.y1 / 1000,
+            "x2": item.x2 / 1000,
+            "y2": item.y2 / 1000,
+        }
+        if current.kind == "moved" and item.origin_x is not None and item.origin_y is not None:
+            update["origin_x"] = item.origin_x / 1000
+            update["origin_y"] = item.origin_y / 1000
+        marks[index] = current.model_copy(update=update)
     return report.model_copy(update={"marks": marks})
 
 

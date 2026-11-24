@@ -9,6 +9,7 @@ from app.providers.openai_provider import (
     ReviewImage,
     _box_instructions,
     _missing_followup_instructions,
+    _placement_instructions,
 )
 from app.schemas.review import ChangeMark
 
@@ -63,10 +64,14 @@ def test_box_instructions_list_objects_before_drawing_boxes() -> None:
     followup = _missing_followup_instructions()
     assert "gone from the AFTER photo" in followup
     assert "Do not report damage" in followup
+    placement = _placement_instructions()
+    assert "0 to 1000" in placement
+    assert "not the width" in placement
+    assert "Do not reuse its pixel position" in placement
 
 
 def test_matched_before_photo_is_compared_again_at_high_detail() -> None:
-    from app.providers.openai_provider import BoxedOutput
+    from app.providers.openai_provider import BoxedOutput, PlacedMark, PlacementOutput
 
     provider, responses = _provider(
         [
@@ -76,28 +81,12 @@ def test_matched_before_photo_is_compared_again_at_high_detail() -> None:
                 summary="scratch and a missing remote",
                 marks=[_mark("damage", "scratch on the door"), _mark("missing", "remote")],
             ),
-        ]
-    )
-    report = provider.review(
-        [_photo("Before photo 1"), _photo("Before photo 2")],
-        [_photo("After photo 1")],
-    )
-
-    assert len(responses.calls) == 2
-    assert _details(responses.calls[0]) == ["auto", "auto", "high"]
-    assert _details(responses.calls[1]) == ["high", "high"]
-    assert report.matched_photo == 2
-    assert [mark.description for mark in report.marks] == ["scratch on the door", "remote"]
-
-
-def test_followup_adds_missing_items_and_keeps_the_other_findings() -> None:
-    from app.providers.openai_provider import BoxedOutput, MissingOutput
-
-    provider, responses = _provider(
-        [
-            BoxedOutput(matched_photo=2),
-            BoxedOutput(marks=[_mark("damage", "scratch on the door"), _mark("new", "extra pillow")]),
-            MissingOutput(marks=[_mark("missing", "remote on the nightstand"), _mark("damage", "ignore me")]),
+            PlacementOutput(
+                marks=[
+                    PlacedMark(index=1, x1=100, y1=150, x2=250, y2=300),
+                    PlacedMark(index=2, x1=400, y1=500, x2=550, y2=700),
+                ]
+            ),
         ]
     )
     report = provider.review(
@@ -106,6 +95,31 @@ def test_followup_adds_missing_items_and_keeps_the_other_findings() -> None:
     )
 
     assert len(responses.calls) == 3
+    assert _details(responses.calls[0]) == ["auto", "auto", "high"]
+    assert _details(responses.calls[1]) == ["high", "high"]
+    assert _details(responses.calls[2]) == ["high", "high"]
+    assert report.matched_photo == 2
+    assert [mark.description for mark in report.marks] == ["scratch on the door", "remote"]
+    assert report.marks[1].x1 == 0.4 and report.marks[1].y2 == 0.7
+
+
+def test_followup_adds_missing_items_and_keeps_the_other_findings() -> None:
+    from app.providers.openai_provider import BoxedOutput, MissingOutput, PlacementOutput
+
+    provider, responses = _provider(
+        [
+            BoxedOutput(matched_photo=2),
+            BoxedOutput(marks=[_mark("damage", "scratch on the door"), _mark("new", "extra pillow")]),
+            MissingOutput(marks=[_mark("missing", "remote on the nightstand"), _mark("damage", "ignore me")]),
+            PlacementOutput(marks=[]),
+        ]
+    )
+    report = provider.review(
+        [_photo("Before photo 1"), _photo("Before photo 2")],
+        [_photo("After photo 1")],
+    )
+
+    assert len(responses.calls) == 4
     assert _details(responses.calls[2]) == ["high", "high"]
     assert [mark.kind for mark in report.marks] == ["damage", "new", "missing"]
     assert report.marks[-1].description == "remote on the nightstand"
@@ -126,15 +140,32 @@ def test_followup_is_skipped_when_the_pair_could_not_compare() -> None:
 
 
 def test_failed_followup_keeps_the_pair_result() -> None:
-    from app.providers.openai_provider import BoxedOutput
+    from app.providers.openai_provider import BoxedOutput, PlacementOutput
 
     provider, responses = _provider(
         [
             BoxedOutput(marks=[_mark("moved", "lamp moved onto the dresser")]),
+            None,
+            PlacementOutput(marks=[]),
+        ]
+    )
+    report = provider.review([_photo("Before photo 1")], [_photo("After photo 1")])
+
+    assert len(responses.calls) == 3
+    assert [mark.description for mark in report.marks] == ["lamp moved onto the dresser"]
+    assert report.marks[0].x1 == 0.2
+
+
+def test_failed_placement_keeps_the_first_boxes() -> None:
+    from app.providers.openai_provider import BoxedOutput
+
+    provider, responses = _provider(
+        [
+            BoxedOutput(marks=[_mark("missing", "handkerchief on the nightstand")]),
             None,
         ]
     )
     report = provider.review([_photo("Before photo 1")], [_photo("After photo 1")])
 
     assert len(responses.calls) == 2
-    assert [mark.description for mark in report.marks] == ["lamp moved onto the dresser"]
+    assert report.marks[0].x1 == 0.2 and report.marks[0].y2 == 0.5

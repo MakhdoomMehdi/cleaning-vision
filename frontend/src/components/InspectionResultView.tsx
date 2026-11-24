@@ -15,12 +15,24 @@ const KIND_LABEL = {
   moved: "Moved",
 } as const;
 
-const BOX_COLOR = {
-  damage: "#2563eb",
-  missing: "#f97316",
-  new: "#dc2626",
-  moved: "#dc2626",
-} as const;
+const FINDING_COLORS = [
+  "#2563eb",
+  "#ea580c",
+  "#dc2626",
+  "#16a34a",
+  "#9333ea",
+  "#0891b2",
+  "#ca8a04",
+  "#db2777",
+  "#4f46e5",
+  "#0d9488",
+  "#c026d3",
+  "#65a30d",
+] as const;
+
+function findingColor(index: number): string {
+  return FINDING_COLORS[index % FINDING_COLORS.length];
+}
 
 function PlainPhoto({ image, title }: { image: InspectionImageResult; title: string }) {
   return (
@@ -39,54 +51,61 @@ function FindingsPhoto({ image, boxes }: { image: InspectionImageResult; boxes: 
   return (
     <figure>
       <figcaption className="mb-1 text-sm font-medium">Findings</figcaption>
-      <div className="pt-6">
+      <div className="overflow-hidden rounded border border-neutral-200 bg-neutral-100">
         <div className="relative">
           <img
             src={inspectionImageUrl(image.image_url)}
             alt={`Findings on ${image.original_filename}`}
-            className="block w-full rounded border border-neutral-200 bg-neutral-100"
+            className="block h-auto w-full"
           />
-          {boxes.map((box, index) => (
-            <div key={`${box.kind}-${index}`}>
-              <div
-                className="absolute border-2"
-                style={{
-                  left: `${box.x1 * 100}%`,
-                  top: `${box.y1 * 100}%`,
-                  width: `${(box.x2 - box.x1) * 100}%`,
-                  height: `${(box.y2 - box.y1) * 100}%`,
-                  borderColor: BOX_COLOR[box.kind],
-                }}
-              >
-                <span
-                  className="absolute bottom-full left-0 mb-0.5 max-w-[14rem] truncate px-1 py-0.5 text-[11px] font-semibold leading-tight text-white"
-                  style={{ backgroundColor: BOX_COLOR[box.kind] }}
-                >
-                  {KIND_LABEL[box.kind]}: {box.description}
-                </span>
-              </div>
-              {box.kind === "moved" && box.origin_x != null && box.origin_y != null && (
-                <div
-                  className="absolute flex -translate-x-1/2 -translate-y-full flex-col items-center"
-                  style={{ left: `${box.origin_x * 100}%`, top: `${box.origin_y * 100}%` }}
-                >
-                  <span
-                    className="mb-0.5 whitespace-nowrap px-1 py-0.5 text-[11px] font-semibold text-white"
-                    style={{ backgroundColor: BOX_COLOR.moved }}
-                  >
-                    Was here
-                  </span>
-                  <span
-                    className="h-3 w-3 rounded-full border-2 border-white"
-                    style={{ backgroundColor: BOX_COLOR.moved }}
+          <div className="absolute inset-0">
+            {boxes.map((box, index) => {
+              const color = findingColor(index);
+              return (
+                <div key={`${box.kind}-${index}`}>
+                  <div
+                    className="absolute border-2"
+                    style={{
+                      left: `${box.x1 * 100}%`,
+                      top: `${box.y1 * 100}%`,
+                      width: `${(box.x2 - box.x1) * 100}%`,
+                      height: `${(box.y2 - box.y1) * 100}%`,
+                      borderColor: color,
+                    }}
                   />
+                  {box.kind === "moved" && box.origin_x != null && box.origin_y != null && (
+                    <span
+                      className="absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white"
+                      style={{
+                        left: `${box.origin_x * 100}%`,
+                        top: `${box.origin_y * 100}%`,
+                        backgroundColor: color,
+                      }}
+                    />
+                  )}
                 </div>
-              )}
-            </div>
-          ))}
+              );
+            })}
+          </div>
         </div>
       </div>
+      <FindingList boxes={boxes} />
     </figure>
+  );
+}
+
+function FindingList({ boxes }: { boxes: ChangeBox[] }) {
+  if (boxes.length === 0) {
+    return null;
+  }
+  return (
+    <ul className="mt-2 space-y-1 text-sm">
+      {boxes.map((box, index) => (
+        <li key={`${box.kind}-${index}`} className="font-medium" style={{ color: findingColor(index) }}>
+          {KIND_LABEL[box.kind]}: {box.description}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -110,7 +129,7 @@ export default function InspectionResultView({ results }: { results: InspectionR
           </p>
         )}
         <p className="mt-1 text-neutral-600">
-          Blue is damaged, orange is missing, red is new or moved. A moved item is one box
+          Each color matches one finding listed under the photo. A moved item is one box
           where it is now, and a pin where it used to be.
         </p>
         {results.summary && <p className="mt-1 text-neutral-700">{results.summary}</p>}

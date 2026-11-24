@@ -3,7 +3,7 @@
 Compares saved before photos of a room with one photo taken after a guest stay. OpenAI looks at
 the whole before pool, uses the angles that match the after photo, and reports **damage**,
 **missing**, and **new**. The result shows the matched before photo, the after photo, and a
-third findings photo with boxes: blue for damage, orange for missing, red for anything else.
+third findings photo with one color per finding. The box has no label; the list under the photo uses that same color.
 
 ## Architecture
 
