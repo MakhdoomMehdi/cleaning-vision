@@ -8,16 +8,16 @@ export type InspectionDecision =
 
 export type VisionStatus = "skipped" | "completed" | "failed";
 
-export type ReviewMode = "semantic" | "boxes";
-
 export interface ChangeBox {
   image_id: string;
-  kind: "damage" | "missing" | "new";
+  kind: "damage" | "missing" | "new" | "moved";
   description: string;
   x1: number;
   y1: number;
   x2: number;
   y2: number;
+  origin_x: number | null;
+  origin_y: number | null;
 }
 
 export interface InspectionImageResult {
@@ -36,8 +36,8 @@ export interface InspectionResults {
   status: InspectionStatus;
   failed_stage: string | null;
   error_message: string | null;
-  mode: ReviewMode;
   images: InspectionImageResult[];
+  matched_image_id: string | null;
   damage: string[];
   missing: string[];
   new: string[];

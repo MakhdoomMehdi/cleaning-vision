@@ -208,6 +208,30 @@ def test_missing_files_field_rejected(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_delete_removes_the_row_and_the_file(client: TestClient, isolated_storage: Path) -> None:
+    created = upload(client, [jpeg("keep.jpg"), jpeg("drop.jpg")]).json()["items"]
+    target = next(item for item in created if item["original_filename"] == "drop.jpg")
+    assert stored_files(isolated_storage)
+
+    response = client.delete(f"/api/v1/references/{target['id']}")
+    assert response.status_code == 204
+    assert response.content == b""
+
+    listed = client.get("/api/v1/references", params={"property_id": "prop-1"}).json()
+    assert [item["original_filename"] for item in listed["items"]] == ["keep.jpg"]
+    assert client.get(target["image_url"]).status_code == 404
+    with get_session_factory()() as session:
+        assert session.get(ReferenceImage, target["id"]) is None
+    names = {path.name for path in stored_files(isolated_storage)}
+    assert len(names) == 1
+
+
+def test_delete_unknown_reference_404(client: TestClient) -> None:
+    missing = "00000000-0000-4000-8000-000000000000"
+    assert client.delete(f"/api/v1/references/{missing}").status_code == 404
+    assert client.delete("/api/v1/references/not-a-uuid").status_code == 422
+
+
 def test_unknown_reference_image_404(client: TestClient) -> None:
     assert client.get("/api/v1/references/00000000-0000-4000-8000-000000000000/image").status_code == 404
 

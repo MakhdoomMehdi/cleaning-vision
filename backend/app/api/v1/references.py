@@ -99,6 +99,16 @@ def list_references(
     return ReferenceListResponse(items=items, total=len(items))
 
 
+@router.delete("/references/{reference_id}", status_code=204)
+def delete_reference(reference_id: UUID, service: ReferenceServiceDep) -> Response:
+    """Delete one saved reference image and its file on disk."""
+    try:
+        service.delete_reference(str(reference_id))
+    except ReferenceNotFoundError:
+        raise HTTPException(status_code=404, detail="Reference image not found.") from None
+    return Response(status_code=204)
+
+
 @router.get("/references/{reference_id}/image")
 def get_reference_image(reference_id: UUID, service: ReferenceServiceDep) -> Response:
     """Serve a stored reference image by ID (the client never supplies a file path)."""

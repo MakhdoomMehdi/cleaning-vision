@@ -3,7 +3,6 @@ import type {
   InspectionListResponse,
   InspectionResults,
   InspectionSummary,
-  ReviewMode,
 } from "../types/inspection";
 import type { LocationListResponse, ReferenceListResponse } from "../types/reference";
 
@@ -73,6 +72,28 @@ export function uploadReferences(
   });
 }
 
+export async function deleteReference(referenceId: string, signal?: AbortSignal): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/v1/references/${referenceId}`, {
+      method: "DELETE",
+      signal,
+    });
+  } catch {
+    throw new ApiError(`Cannot reach the backend at ${API_BASE_URL}. Is it running?`);
+  }
+  if (!response.ok) {
+    let detail = `Request failed with status ${response.status}`;
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      if (typeof body.detail === "string") detail = body.detail;
+    } catch {
+      // Empty or non-JSON error body.
+    }
+    throw new ApiError(detail, response.status);
+  }
+}
+
 export function referenceImageUrl(imagePath: string): string {
   return `${API_BASE_URL}${imagePath}`;
 }
@@ -85,13 +106,11 @@ export function createInspection(
   propertyId: string,
   location: string,
   files: File[],
-  mode: ReviewMode,
   signal?: AbortSignal,
 ): Promise<InspectionSummary> {
   const form = new FormData();
   form.append("property_id", propertyId);
   form.append("location", location);
-  form.append("mode", mode);
   for (const file of files) form.append("files", file);
   return request<InspectionSummary>("/api/v1/inspections", {
     method: "POST",

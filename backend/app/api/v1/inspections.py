@@ -13,7 +13,6 @@ from app.schemas.inspection import (
     InspectionResults,
 )
 from app.schemas.reference import PROPERTY_ID_PATTERN, LocationType
-from app.schemas.review import ReviewMode
 from app.services.image_service import ImageValidationError
 from app.services.inspection_service import (
     InspectionNotFoundError,
@@ -41,7 +40,6 @@ def create_inspection(
     property_id: Annotated[str, Form(pattern=PROPERTY_ID_PATTERN)],
     location: Annotated[LocationType, Form()],
     files: Annotated[list[UploadFile], File(description="One or more inspection images")],
-    mode: Annotated[ReviewMode, Form()] = ReviewMode.SEMANTIC,
 ) -> InspectionDetail:
     """Run an inspection synchronously and return it.
 
@@ -64,7 +62,7 @@ def create_inspection(
             )
             for f in files
         ]
-        inspection = service.create(property_id, location, uploads, mode)
+        inspection = service.create(property_id, location, uploads)
     except NoReferencesError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except TooManyReferencesError as exc:

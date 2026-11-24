@@ -6,7 +6,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import ReferenceImage
+from app.db.models import InspectionImage, ReferenceImage
 from app.schemas.reference import LocationType
 from app.services.image_service import ImageService
 from app.services.uploads import UploadedFile, display_filename, prepare_uploads
@@ -90,6 +90,22 @@ class ReferenceService:
             value = location.value if isinstance(location, LocationType) else location
             stmt = stmt.where(ReferenceImage.location == value)
         return list(self._db.scalars(stmt))
+
+    def delete_reference(self, reference_id: str) -> None:
+        """Remove the metadata row and the file on disk."""
+        row = self._db.get(ReferenceImage, reference_id)
+        if row is None:
+            raise ReferenceNotFoundError(reference_id)
+        key = row.storage_key
+        linked = self._db.scalars(
+            select(InspectionImage).where(InspectionImage.reference_image_id == row.id)
+        )
+        for image in linked:
+            image.reference_image_id = None
+        self._db.delete(row)
+        self._db.commit()
+        self._storage.delete(key)
+        logger.info("Deleted reference image %s", reference_id)
 
     def get_image(self, reference_id: str) -> tuple[ReferenceImage, bytes]:
         row = self._db.get(ReferenceImage, reference_id)

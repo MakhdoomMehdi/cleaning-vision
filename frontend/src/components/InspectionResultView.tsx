@@ -1,10 +1,5 @@
 import { inspectionImageUrl } from "../services/api";
-import type {
-  ChangeBox,
-  InspectionDecision,
-  InspectionImageResult,
-  InspectionResults,
-} from "../types/inspection";
+import type { ChangeBox, InspectionDecision, InspectionImageResult, InspectionResults } from "../types/inspection";
 
 const DECISION_LABEL: Record<InspectionDecision, string> = {
   no_issue_detected: "No changes reported in the compared views",
@@ -13,74 +8,94 @@ const DECISION_LABEL: Record<InspectionDecision, string> = {
   manual_review_required: "Manual review required",
 };
 
-const KIND_LABEL = { damage: "Damage", missing: "Missing", new: "New" } as const;
-
-const BOX_COLOR = {
-  damage: "border-red-600 bg-red-600/10 text-red-800",
-  missing: "border-amber-600 bg-amber-500/10 text-amber-900",
-  new: "border-blue-600 bg-blue-600/10 text-blue-800",
+const KIND_LABEL = {
+  damage: "Damaged",
+  missing: "Missing",
+  new: "Other",
+  moved: "Moved",
 } as const;
 
-function Photo({
-  image,
-  title,
-  boxes,
-}: {
-  image: InspectionImageResult;
-  title: string;
-  boxes: ChangeBox[];
-}) {
+const BOX_COLOR = {
+  damage: "#2563eb",
+  missing: "#f97316",
+  new: "#dc2626",
+  moved: "#dc2626",
+} as const;
+
+function PlainPhoto({ image, title }: { image: InspectionImageResult; title: string }) {
   return (
     <figure>
       <figcaption className="mb-1 text-sm font-medium">{title}</figcaption>
-      <div className="relative">
-        <img
-          src={inspectionImageUrl(image.image_url)}
-          alt={image.original_filename}
-          className="w-full rounded border border-neutral-200 bg-neutral-100"
-        />
-        {boxes.map((box, index) => (
-          <div
-            key={`${box.kind}-${index}`}
-            className={`absolute border-2 ${BOX_COLOR[box.kind]}`}
-            style={{
-              left: `${box.x1 * 100}%`,
-              top: `${box.y1 * 100}%`,
-              width: `${(box.x2 - box.x1) * 100}%`,
-              height: `${(box.y2 - box.y1) * 100}%`,
-            }}
-          >
-            <span className="absolute left-0 top-0 max-w-[14rem] bg-white/95 px-1 text-[11px] font-medium leading-tight">
-              {KIND_LABEL[box.kind]}: {box.description}
-            </span>
-          </div>
-        ))}
+      <img
+        src={inspectionImageUrl(image.image_url)}
+        alt={image.original_filename}
+        className="w-full rounded border border-neutral-200 bg-neutral-100"
+      />
+    </figure>
+  );
+}
+
+function FindingsPhoto({ image, boxes }: { image: InspectionImageResult; boxes: ChangeBox[] }) {
+  return (
+    <figure>
+      <figcaption className="mb-1 text-sm font-medium">Findings</figcaption>
+      <div className="pt-6">
+        <div className="relative">
+          <img
+            src={inspectionImageUrl(image.image_url)}
+            alt={`Findings on ${image.original_filename}`}
+            className="block w-full rounded border border-neutral-200 bg-neutral-100"
+          />
+          {boxes.map((box, index) => (
+            <div key={`${box.kind}-${index}`}>
+              <div
+                className="absolute border-2"
+                style={{
+                  left: `${box.x1 * 100}%`,
+                  top: `${box.y1 * 100}%`,
+                  width: `${(box.x2 - box.x1) * 100}%`,
+                  height: `${(box.y2 - box.y1) * 100}%`,
+                  borderColor: BOX_COLOR[box.kind],
+                }}
+              >
+                <span
+                  className="absolute bottom-full left-0 mb-0.5 max-w-[14rem] truncate px-1 py-0.5 text-[11px] font-semibold leading-tight text-white"
+                  style={{ backgroundColor: BOX_COLOR[box.kind] }}
+                >
+                  {KIND_LABEL[box.kind]}: {box.description}
+                </span>
+              </div>
+              {box.kind === "moved" && box.origin_x != null && box.origin_y != null && (
+                <div
+                  className="absolute flex -translate-x-1/2 -translate-y-full flex-col items-center"
+                  style={{ left: `${box.origin_x * 100}%`, top: `${box.origin_y * 100}%` }}
+                >
+                  <span
+                    className="mb-0.5 whitespace-nowrap px-1 py-0.5 text-[11px] font-semibold text-white"
+                    style={{ backgroundColor: BOX_COLOR.moved }}
+                  >
+                    Was here
+                  </span>
+                  <span
+                    className="h-3 w-3 rounded-full border-2 border-white"
+                    style={{ backgroundColor: BOX_COLOR.moved }}
+                  />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
     </figure>
   );
 }
 
-function ChangeList({ title, items }: { title: string; items: string[] }) {
-  return (
-    <section>
-      <h3 className="text-sm font-medium">{title}</h3>
-      {items.length === 0 ? (
-        <p className="mt-1 text-sm text-neutral-600">None reported.</p>
-      ) : (
-        <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-neutral-800">
-          {items.map((item, index) => (
-            <li key={`${title}-${index}`}>{item}</li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
 export default function InspectionResultView({ results }: { results: InspectionResults }) {
-  const before = results.images.filter((image) => image.role === "reference");
-  const after = results.images.filter((image) => image.role === "inspection");
-  const boxes = results.mode === "boxes" ? results.boxes : [];
+  const before =
+    results.images.find((image) => image.image_id === results.matched_image_id) ??
+    results.images.find((image) => image.role === "reference");
+  const after = results.images.find((image) => image.role === "inspection");
+  const boxes = after ? results.boxes.filter((box) => box.image_id === after.image_id) : [];
 
   return (
     <div className="space-y-4">
@@ -95,44 +110,17 @@ export default function InspectionResultView({ results }: { results: InspectionR
           </p>
         )}
         <p className="mt-1 text-neutral-600">
-          {results.mode === "boxes"
-            ? "Boxes mark each change. The label says what it is."
-            : "Semantic check: a text list of damage, missing items, and new items."}
+          Blue is damaged, orange is missing, red is new or moved. A moved item is one box
+          where it is now, and a pin where it used to be.
         </p>
         {results.summary && <p className="mt-1 text-neutral-700">{results.summary}</p>}
-        {results.views_compared && (
-          <p className="mt-1 text-neutral-600">Views used: {results.views_compared}</p>
-        )}
         {results.note && <p className="mt-1 text-neutral-700">{results.note}</p>}
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="space-y-3">
-          {before.map((image, index) => (
-            <Photo
-              key={image.image_id}
-              image={image}
-              title={before.length > 1 ? `Before photo ${index + 1}` : "Before"}
-              boxes={boxes.filter((box) => box.image_id === image.image_id)}
-            />
-          ))}
-        </div>
-        <div className="space-y-3">
-          {after.map((image, index) => (
-            <Photo
-              key={image.image_id}
-              image={image}
-              title={after.length > 1 ? `After photo ${index + 1}` : "After"}
-              boxes={boxes.filter((box) => box.image_id === image.image_id)}
-            />
-          ))}
-        </div>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-3">
-        <ChangeList title="Damage" items={results.damage} />
-        <ChangeList title="Missing" items={results.missing} />
-        <ChangeList title="New" items={results.new} />
+      <div className="grid gap-4 md:grid-cols-3">
+        {before && <PlainPhoto image={before} title="Before" />}
+        {after && <PlainPhoto image={after} title="After" />}
+        {after && <FindingsPhoto image={after} boxes={boxes} />}
       </div>
     </div>
   );

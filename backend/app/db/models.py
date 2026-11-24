@@ -82,8 +82,7 @@ class Inspection(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
-    # semantic | boxes. Chosen when the inspection is created.
-    review_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="semantic")
+    review_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="boxes")
     # OpenAI review: damage, missing, new, and optional boxes.
     comparison: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 

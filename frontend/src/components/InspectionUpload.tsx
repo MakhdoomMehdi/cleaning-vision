@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ApiError, createInspection, getInspectionResults } from "../services/api";
-import type { InspectionResults, ReviewMode } from "../types/inspection";
+import type { InspectionResults } from "../types/inspection";
 import ImageUploader from "./ImageUploader";
 
 interface InspectionUploadProps {
@@ -22,7 +22,6 @@ export default function InspectionUpload({
   onComplete,
 }: InspectionUploadProps) {
   const [files, setFiles] = useState<File[]>([]);
-  const [mode, setMode] = useState<ReviewMode>("semantic");
   const [state, setState] = useState<State>({ kind: "idle" });
   const [uploaderKey, setUploaderKey] = useState(0);
 
@@ -33,7 +32,7 @@ export default function InspectionUpload({
     if (!propertyId || files.length === 0) return;
     setState({ kind: "running" });
     try {
-      const created = await createInspection(propertyId, location, files, mode);
+      const created = await createInspection(propertyId, location, files);
       const results = await getInspectionResults(created.id);
       setFiles([]);
       setUploaderKey((k) => k + 1);
@@ -51,18 +50,6 @@ export default function InspectionUpload({
         Upload the <strong>after</strong> photo of the {locationLabel || "room"}. The saved before
         photos are sent with it. This can take up to a minute.
       </p>
-      <label className="mb-3 block text-sm">
-        <span className="font-medium">How to compare</span>
-        <select
-          value={mode}
-          disabled={running}
-          onChange={(event) => setMode(event.target.value as ReviewMode)}
-          className="mt-1 block w-full rounded border border-neutral-300 bg-white px-3 py-2"
-        >
-          <option value="semantic">Semantic changes (text only)</option>
-          <option value="boxes">Bounding boxes with descriptions</option>
-        </select>
-      </label>
       <ImageUploader
         key={uploaderKey}
         label="After photo"

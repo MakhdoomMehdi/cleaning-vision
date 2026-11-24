@@ -72,70 +72,102 @@ def _phrases(items: list[str]) -> list[str]:
     return cleaned
 
 
-def _clean_mark(mark: ChangeMark, before_count: int, after_count: int) -> ChangeMark | None:
+def _clean_mark(mark: ChangeMark, after_count: int) -> ChangeMark | None:
+    """Keep a box only when it can be drawn on the after photo."""
     description = " ".join(mark.description.split())[:_PHRASE_CHARS]
-    if not description:
+    if not description or after_count < 1:
         return None
-    limit = before_count if mark.side == "before" else after_count
-    if mark.photo_number < 1 or mark.photo_number > limit:
+    photo_number = 1 if after_count == 1 or mark.side != "after" else mark.photo_number
+    if photo_number < 1 or photo_number > after_count:
         return None
     x1, x2 = sorted((mark.x1, mark.x2))
     y1, y2 = sorted((mark.y1, mark.y2))
     if x2 - x1 < 0.01 or y2 - y1 < 0.01:
         return None
+    origin_x = origin_y = None
+    if mark.kind == "moved" and mark.origin_x is not None and mark.origin_y is not None:
+        origin_x = min(1.0, max(0.0, mark.origin_x))
+        origin_y = min(1.0, max(0.0, mark.origin_y))
     return ChangeMark(
         kind=mark.kind,
         description=description,
-        side=mark.side,
-        photo_number=mark.photo_number,
+        side="after",
+        photo_number=photo_number,
         x1=x1,
         y1=y1,
         x2=x2,
         y2=y2,
+        origin_x=origin_x,
+        origin_y=origin_y,
     )
 
 
-def normalize_review(
-    report: RoomReview, mode: ReviewMode, before_count: int, after_count: int
-) -> RoomReview:
+def _matched_photo(report: RoomReview, before_count: int) -> int:
+    if before_count < 1:
+        return 1
+    if 1 <= report.matched_photo <= before_count:
+        return report.matched_photo
+    return 1
+
+
+def normalize_review(report: RoomReview, before_count: int, after_count: int) -> RoomReview:
     summary = " ".join(report.summary.split())[:1000]
     views = " ".join(report.views_compared.split())[:500]
+    matched = _matched_photo(report, before_count)
     if not report.could_compare:
         return RoomReview(
-            mode=mode, summary=summary, views_compared=views, could_compare=False
-        )
-    if mode == ReviewMode.SEMANTIC:
-        return RoomReview(
-            mode=mode,
-            damage=_phrases(report.damage),
-            missing=_phrases(report.missing),
-            new=_phrases(report.new),
+            mode=ReviewMode.BOXES,
+            matched_photo=matched,
             summary=summary,
             views_compared=views,
-            could_compare=True,
+            could_compare=False,
         )
     marks: list[ChangeMark] = []
     for mark in report.marks:
-        cleaned = _clean_mark(mark, before_count, after_count)
+        cleaned = _clean_mark(mark, after_count)
         if cleaned is not None:
             marks.append(cleaned)
         if len(marks) == _PHRASE_LIMIT:
             break
     return RoomReview(
-        mode=mode,
+        mode=ReviewMode.BOXES,
         damage=_phrases([mark.description for mark in marks if mark.kind == "damage"]),
         missing=_phrases([mark.description for mark in marks if mark.kind == "missing"]),
         new=_phrases([mark.description for mark in marks if mark.kind == "new"]),
+        moved=_phrases([mark.description for mark in marks if mark.kind == "moved"]),
         marks=marks,
+        matched_photo=matched,
         summary=summary,
         views_compared=views,
         could_compare=True,
     )
 
 
+def _matched_image_id(
+    report: RoomReview | None, images: list[InspectionImageOut]
+) -> str | None:
+    refs = [image for image in images if image.role == "reference"]
+    if not refs:
+        return None
+    number = report.matched_photo if report is not None else 1
+    wanted = f"ref_{number}"
+    if any(image.image_id == wanted for image in refs):
+        return wanted
+    return refs[0].image_id
+
+
+def _comparison_images(
+    images: list[InspectionImageOut], matched_image_id: str | None
+) -> list[InspectionImageOut]:
+    """The matched before photo and the after photo. The rest of the pool stays stored."""
+    return [
+        image
+        for image in images
+        if image.role == "inspection" or image.image_id == matched_image_id
+    ]
+
+
 def _boxes(report: RoomReview) -> list[ChangeBox]:
-    if report.mode != ReviewMode.BOXES:
-        return []
     return [
         ChangeBox(
             image_id=f"{'ref' if mark.side == 'before' else 'new'}_{mark.photo_number}",
@@ -145,6 +177,8 @@ def _boxes(report: RoomReview) -> list[ChangeBox]:
             y1=mark.y1,
             x2=mark.x2,
             y2=mark.y2,
+            origin_x=mark.origin_x,
+            origin_y=mark.origin_y,
         )
         for mark in report.marks
     ]
@@ -153,7 +187,7 @@ def _boxes(report: RoomReview) -> list[ChangeBox]:
 def decide(report: RoomReview) -> InspectionDecision:
     if not report.could_compare:
         return InspectionDecision.INCONCLUSIVE
-    if report.damage or report.missing or report.new:
+    if report.damage or report.missing or report.new or report.moved:
         return InspectionDecision.POTENTIAL_ISSUES
     return InspectionDecision.NO_ISSUE_DETECTED
 
@@ -206,7 +240,6 @@ class InspectionService:
         property_id: str,
         location: LocationType,
         files: list[UploadedFile],
-        mode: ReviewMode = ReviewMode.SEMANTIC,
     ) -> Inspection:
         refs = self._references.list_references(property_id, location)
         if not refs:
@@ -221,7 +254,7 @@ class InspectionService:
             )
 
         prepared = prepare_uploads(self._images, files)
-        inspection = self._persist_inputs(property_id, location, refs, prepared, mode)
+        inspection = self._persist_inputs(property_id, location, refs, prepared, ReviewMode.BOXES)
         self._run_pipeline(inspection.id)
         return self._db.get_one(Inspection, inspection.id)
 
@@ -301,10 +334,8 @@ class InspectionService:
                 for index, row in enumerate((r for r in rows if r.role == "inspection"), start=1)
             ]
             inspection = self._db.get_one(Inspection, inspection_id)
-            mode = ReviewMode(inspection.review_mode)
             report = normalize_review(
-                self._vision.review(before, after, mode),
-                mode,
+                self._vision.review(before, after),
                 before_count=len(before),
                 after_count=len(after),
             )
@@ -422,7 +453,9 @@ class InspectionService:
         report = load_report(row.comparison)
         change_count = None
         if report is not None:
-            change_count = len(report.damage) + len(report.missing) + len(report.new)
+            change_count = (
+                len(report.damage) + len(report.missing) + len(report.new) + len(report.moved)
+            )
         return InspectionSummary(
             id=row.id,
             property_id=row.property_id,
@@ -469,7 +502,9 @@ class InspectionService:
             )
         elif row.decision == InspectionDecision.INCONCLUSIVE.value and not (report and report.summary):
             note = "These photos do not show the same part of the room clearly enough to compare."
-        mode = report.mode if report is not None else ReviewMode(row.review_mode or "semantic")
+        mode = ReviewMode.BOXES
+        images = [InspectionImageOut(**self._image_out(row.id, img)) for img in self._image_rows(row.id)]
+        matched_image_id = _matched_image_id(report, images)
         return InspectionResults(
             inspection_id=row.id,
             property_id=row.property_id,
@@ -478,11 +513,12 @@ class InspectionService:
             failed_stage=row.failed_stage,
             error_message=row.error_message,
             mode=mode.value,
-            images=[InspectionImageOut(**self._image_out(row.id, img)) for img in self._image_rows(row.id)],
+            images=_comparison_images(images, matched_image_id),
             damage=report.damage if report else [],
             missing=report.missing if report else [],
             new=report.new if report else [],
             boxes=_boxes(report) if report else [],
+            matched_image_id=matched_image_id,
             summary=report.summary or None if report else None,
             views_compared=report.views_compared or None if report else None,
             decision=summary.decision,

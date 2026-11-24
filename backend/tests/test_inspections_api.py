@@ -24,17 +24,9 @@ class FakeVision:
     def __init__(self) -> None:
         self.fail = False
         self.calls = 0
-        self.last_mode: ReviewMode | None = None
         self.report = RoomReview(
-            damage=["scratch on the nightstand"],
-            missing=["chair"],
-            new=["water bottle"],
-            summary="The after photo matches the bed-wall before photos.",
-            views_compared="The bed wall and the window.",
-            could_compare=True,
-        )
-        self.box_report = RoomReview(
             mode=ReviewMode.BOXES,
+            matched_photo=2,
             summary="One scratch and one missing chair.",
             views_compared="The bed wall.",
             marks=[
@@ -61,15 +53,12 @@ class FakeVision:
             ],
         )
 
-    def review(
-        self, before: list[ReviewImage], after: list[ReviewImage], mode: ReviewMode
-    ) -> RoomReview:
+    def review(self, before: list[ReviewImage], after: list[ReviewImage]) -> RoomReview:
         self.calls += 1
-        self.last_mode = mode
         assert before and after
         if self.fail:
             raise VisionProviderError("secret internal detail")
-        return self.box_report if mode == ReviewMode.BOXES else self.report
+        return self.report
 
 
 def jpeg_bytes(size: tuple[int, int] = (640, 480)) -> bytes:
@@ -106,11 +95,10 @@ def start_inspection(
     images: list[bytes],
     property_id: str = "p1",
     location: str = "garage",
-    mode: str = "semantic",
 ):
     return api.post(
         "/api/v1/inspections",
-        data={"property_id": property_id, "location": location, "mode": mode},
+        data={"property_id": property_id, "location": location},
         files=[("files", (f"after{i}.jpg", data, "image/jpeg")) for i, data in enumerate(images)],
     )
 
@@ -136,41 +124,54 @@ def test_review_returns_damage_missing_and_new(api: TestClient, vision: FakeVisi
     assert detail["status"] == "completed"
     assert detail["failed_stage"] is None and detail["error_message"] is None
     assert detail["reference_image_count"] == 2 and detail["inspection_image_count"] == 1
-    assert detail["change_count"] == 3
+    assert detail["change_count"] == 2
     assert detail["decision"] == "potential_issues"
     assert detail["vision_model"] == "fake-vision"
     assert [i["image_id"] for i in detail["images"]] == ["ref_1", "ref_2", "new_1"]
     assert vision.calls == 1
 
     results = api.get(f"/api/v1/inspections/{detail['id']}/results").json()
-    assert results["mode"] == "semantic" and results["boxes"] == []
-    assert vision.last_mode == ReviewMode.SEMANTIC
-    assert results["damage"] == ["scratch on the nightstand"]
-    assert results["missing"] == ["chair"]
-    assert results["new"] == ["water bottle"]
-    assert results["views_compared"] == "The bed wall and the window."
-    assert "bbox" not in response.text
+    assert results["matched_image_id"] == "ref_2"
+    assert [image["image_id"] for image in results["images"]] == ["ref_2", "new_1"]
+    assert results["damage"] == ["scratch on the door"]
+    assert results["missing"] == ["chair by the window"]
+    assert results["new"] == []
+    assert {box["kind"] for box in results["boxes"]} == {"damage", "missing"}
+    assert {box["image_id"] for box in results["boxes"]} == {"new_1"}
 
     image = api.get(f"/api/v1/inspections/{detail['id']}/images/new_1")
     assert image.status_code == 200 and image.content == after
     assert api.get(f"/api/v1/inspections/{detail['id']}/images/ref_1").status_code == 200
 
 
-def test_box_mode_places_a_description_on_each_photo(api: TestClient, vision: FakeVision) -> None:
+def test_moved_item_is_one_box_and_a_pin(api: TestClient, vision: FakeVision) -> None:
+    vision.report = RoomReview(
+        mode=ReviewMode.BOXES,
+        matched_photo=1,
+        marks=[
+            ChangeMark(
+                kind="moved",
+                description="lamp moved onto the dresser",
+                side="after",
+                photo_number=1,
+                x1=0.6,
+                y1=0.2,
+                x2=0.75,
+                y2=0.45,
+                origin_x=0.2,
+                origin_y=0.4,
+            )
+        ],
+    )
     upload_reference(api)
-    detail = start_inspection(api, [jpeg_bytes()], mode="boxes").json()
-    assert detail["status"] == "completed"
-    assert vision.last_mode == ReviewMode.BOXES
-
+    detail = start_inspection(api, [jpeg_bytes()]).json()
     results = api.get(f"/api/v1/inspections/{detail['id']}/results").json()
-    assert results["mode"] == "boxes"
-    assert results["damage"] == ["scratch on the door"]
-    assert results["missing"] == ["chair by the window"]
-    by_image = {box["image_id"]: box for box in results["boxes"]}
-    assert by_image["new_1"]["description"] == "scratch on the door"
-    assert by_image["new_1"]["kind"] == "damage"
-    assert by_image["ref_1"]["description"] == "chair by the window"
-    assert by_image["ref_1"]["x1"] == 0.5
+    assert len(results["boxes"]) == 1
+    box = results["boxes"][0]
+    assert box["kind"] == "moved"
+    assert box["image_id"] == "new_1"
+    assert box["origin_x"] == 0.2 and box["origin_y"] == 0.4
+    assert results["new"] == []
 
 
 def test_inconclusive_when_the_model_cannot_match_a_view(api: TestClient, vision: FakeVision) -> None:
@@ -205,7 +206,7 @@ def test_database_rows_link_reference_files(api: TestClient) -> None:
     with get_session_factory()() as session:
         inspection = session.get_one(Inspection, detail["id"])
         assert len(inspection.id) == 36 and inspection.created_at.tzinfo is not None
-        assert inspection.comparison["missing"] == ["chair"]
+        assert inspection.comparison["missing"] == ["chair by the window"]
         images = session.scalars(select(InspectionImage)).all()
         assert sorted(i.image_ref for i in images) == ["new_1", "ref_1"]
         ref = next(i for i in images if i.role == "reference")
@@ -330,7 +331,7 @@ def test_list_filters_ordering_and_pagination(api: TestClient) -> None:
     assert api.get("/api/v1/inspections", params={"location": "kitchen"}).json()["total"] == 0
     page = api.get("/api/v1/inspections", params={"limit": 1, "offset": 1}).json()
     assert page["total"] == 3 and [i["id"] for i in page["items"]] == [ids[1]]
-    assert everything["items"][0]["change_count"] == 3
+    assert everything["items"][0]["change_count"] == 2
     assert api.get("/api/v1/inspections", params={"limit": 0}).status_code == 422
 
 

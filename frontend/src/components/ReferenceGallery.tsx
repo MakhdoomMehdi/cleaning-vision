@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ApiError, listReferences, referenceImageUrl } from "../services/api";
+import { ApiError, deleteReference, listReferences, referenceImageUrl } from "../services/api";
 import type { ReferenceImage } from "../types/reference";
 
 interface ReferenceGalleryProps {
@@ -23,6 +23,8 @@ export default function ReferenceGallery({
   refreshKey = 0,
 }: ReferenceGalleryProps) {
   const [state, setState] = useState<GalleryState>({ kind: "loading" });
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!propertyId || !location) return;
@@ -44,6 +46,26 @@ export default function ReferenceGallery({
       controller.abort();
     };
   }, [propertyId, location, refreshKey]);
+
+  async function remove(item: ReferenceImage) {
+    const confirmed = window.confirm(`Delete ${item.original_filename}? The file will be removed.`);
+    if (!confirmed) return;
+    setDeleteError(null);
+    setDeletingId(item.id);
+    try {
+      await deleteReference(item.id);
+      setState((current) =>
+        current.kind === "ready"
+          ? { kind: "ready", items: current.items.filter((image) => image.id !== item.id) }
+          : current,
+      );
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Could not delete that photo.";
+      setDeleteError(message);
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   if (!propertyId) {
     return (
@@ -75,6 +97,11 @@ export default function ReferenceGallery({
       <p className="mb-2 text-sm text-neutral-600">
         {state.items.length} reference image{state.items.length === 1 ? "" : "s"} saved
       </p>
+      {deleteError && (
+        <p role="alert" className="mb-2 text-sm text-red-700">
+          {deleteError}
+        </p>
+      )}
       <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         {state.items.map((item) => (
           <li
@@ -87,9 +114,19 @@ export default function ReferenceGallery({
               loading="lazy"
               className="h-28 w-full object-cover"
             />
-            <p className="truncate px-2 py-1 text-xs text-neutral-600">
-              {item.original_filename} · {item.width}×{item.height}
-            </p>
+            <div className="flex items-center justify-between gap-2 px-2 py-1">
+              <p className="truncate text-xs text-neutral-600">
+                {item.original_filename} · {item.width}×{item.height}
+              </p>
+              <button
+                type="button"
+                onClick={() => remove(item)}
+                disabled={deletingId === item.id}
+                className="shrink-0 text-xs font-medium text-red-700 hover:underline disabled:opacity-50"
+              >
+                {deletingId === item.id ? "Deleting…" : "Delete"}
+              </button>
+            </div>
           </li>
         ))}
       </ul>

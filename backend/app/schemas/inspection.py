@@ -43,12 +43,14 @@ class ChangeBox(BaseModel):
     """A described change, placed on one photo. Coordinates are fractions of that photo."""
 
     image_id: str
-    kind: Literal["damage", "missing", "new"]
+    kind: Literal["damage", "missing", "new", "moved"]
     description: str
     x1: float
     y1: float
     x2: float
     y2: float
+    origin_x: float | None = None
+    origin_y: float | None = None
 
 
 class InspectionImageOut(BaseModel):
@@ -78,12 +80,14 @@ class InspectionResults(BaseModel):
     status: InspectionStatus
     failed_stage: str | None = None
     error_message: str | None = None
-    mode: Literal["semantic", "boxes"] = "semantic"
+    mode: Literal["boxes"] = "boxes"
     images: list[InspectionImageOut]
     damage: list[str] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)
     new: list[str] = Field(default_factory=list)
     boxes: list[ChangeBox] = Field(default_factory=list)
+    # The one before photo chosen for this comparison. Other saved angles are omitted.
+    matched_image_id: str | None = None
     summary: str | None = None
     views_compared: str | None = None
     decision: InspectionDecision | None = None

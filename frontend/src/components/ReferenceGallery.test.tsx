@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import * as api from "../services/api";
 import type { ReferenceImage, ReferenceListResponse } from "../types/reference";
@@ -52,6 +53,22 @@ describe("ReferenceGallery", () => {
     render(<ReferenceGallery propertyId="house-1" location="garage" />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Backend down");
+  });
+
+  it("deletes a reference image and removes it from the gallery", async () => {
+    vi.spyOn(api, "listReferences").mockResolvedValue(list([ref("a1", "wall.jpg"), ref("b2", "door.jpg")]));
+    const remove = vi.spyOn(api, "deleteReference").mockResolvedValue();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    render(<ReferenceGallery propertyId="house-1" location="garage" />);
+
+    const [deleteWall] = await screen.findAllByRole("button", { name: "Delete" });
+    await user.click(deleteWall);
+
+    expect(remove).toHaveBeenCalledWith("a1");
+    expect(await screen.findByText("1 reference image saved")).toBeInTheDocument();
+    expect(screen.queryByAltText("Reference wall.jpg")).not.toBeInTheDocument();
+    expect(screen.getByAltText("Reference door.jpg")).toBeInTheDocument();
   });
 
   it("reloads when refreshKey changes", async () => {
