@@ -267,6 +267,8 @@ def test_inspection_without_references_checks_guest_readiness(
             "y2": 0.82,
             "origin_x": None,
             "origin_y": None,
+            "cells": [],
+            "color": None,
         }
     ]
 

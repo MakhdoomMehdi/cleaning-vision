@@ -60,7 +60,7 @@ function FindingsPhoto({ image, boxes }: { image: InspectionImageResult; boxes: 
           />
           <div className="absolute inset-0">
             {boxes.map((box, index) => {
-              const color = findingColor(index);
+              const color = box.color || findingColor(index);
               return (
                 <div key={`${box.kind}-${index}`}>
                   <div
@@ -108,7 +108,11 @@ function FindingList({ boxes }: { boxes: ChangeBox[] }) {
   return (
     <ul className="mt-2 space-y-1 text-sm">
       {boxes.map((box, index) => (
-        <li key={`${box.kind}-${index}`} className="font-medium" style={{ color: findingColor(index) }}>
+        <li
+          key={`${box.kind}-${index}`}
+          className="font-medium"
+          style={{ color: box.color || findingColor(index) }}
+        >
           {findingText(box)}
         </li>
       ))}
@@ -157,6 +161,9 @@ export default function InspectionResultView({ results }: { results: InspectionR
         </p>
         {results.readiness && results.overall_score != null && (
           <p className="mt-1 text-neutral-700">Score {results.overall_score} out of 100.</p>
+        )}
+        {results.retake && (
+          <p className="mt-1 text-neutral-700">This photo is hard to judge. Take it again.</p>
         )}
         {results.summary && <p className="mt-1 text-neutral-700">{results.summary}</p>}
         {results.note && <p className="mt-1 text-neutral-700">{results.note}</p>}

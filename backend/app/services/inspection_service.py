@@ -178,6 +178,8 @@ def _boxes(report: RoomReview) -> list[ChangeBox]:
                 y1=issue.y1,
                 x2=issue.x2,
                 y2=issue.y2,
+                cells=issue.cells,
+                color=issue.color or None,
             )
             for issue in report.issues
         ]
@@ -192,6 +194,8 @@ def _boxes(report: RoomReview) -> list[ChangeBox]:
             y2=mark.y2,
             origin_x=mark.origin_x,
             origin_y=mark.origin_y,
+            cells=mark.cells,
+            color=mark.color or None,
         )
         for mark in report.marks
     ]
@@ -572,6 +576,7 @@ class InspectionService:
             readiness=bool(report and report.readiness),
             guest_ready=report.guest_ready if report else None,
             overall_score=report.overall_score if report else None,
+            retake=bool(report and report.retake),
             images=_comparison_images(images, matched_image_id),
             damage=report.damage if report else [],
             missing=report.missing if report else [],

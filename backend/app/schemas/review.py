@@ -25,6 +25,8 @@ class ChangeMark(BaseModel):
     # Center of where a moved item used to be, on the same after photo. Not a second box.
     origin_x: float | None = Field(default=None, ge=0.0, le=1.0)
     origin_y: float | None = Field(default=None, ge=0.0, le=1.0)
+    cells: list[str] = Field(default_factory=list)
+    color: str = ""
 
 
 class GuestIssue(BaseModel):
@@ -38,6 +40,8 @@ class GuestIssue(BaseModel):
     y1: float = Field(ge=0.0, le=1.0)
     x2: float = Field(ge=0.0, le=1.0)
     y2: float = Field(ge=0.0, le=1.0)
+    cells: list[str] = Field(default_factory=list)
+    color: str = ""
 
 
 class RoomReview(BaseModel):
@@ -57,4 +61,6 @@ class RoomReview(BaseModel):
     guest_ready: bool | None = None
     overall_score: int | None = Field(default=None, ge=0, le=100)
     image_quality_note: str = ""
+    confidence: float | None = None
+    retake: bool = False
     issues: list[GuestIssue] = Field(default_factory=list)

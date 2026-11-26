@@ -51,6 +51,8 @@ class ChangeBox(BaseModel):
     y2: float
     origin_x: float | None = None
     origin_y: float | None = None
+    cells: list[str] = Field(default_factory=list)
+    color: str | None = None
 
 
 class InspectionImageOut(BaseModel):
@@ -84,6 +86,7 @@ class InspectionResults(BaseModel):
     readiness: bool = False
     guest_ready: bool | None = None
     overall_score: int | None = None
+    retake: bool = False
     images: list[InspectionImageOut]
     damage: list[str] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)

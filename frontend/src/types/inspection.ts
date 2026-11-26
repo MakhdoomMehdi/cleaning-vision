@@ -18,6 +18,8 @@ export interface ChangeBox {
   y2: number;
   origin_x: number | null;
   origin_y: number | null;
+  cells?: string[];
+  color?: string | null;
 }
 
 export interface InspectionImageResult {
@@ -40,6 +42,7 @@ export interface InspectionResults {
   readiness: boolean;
   guest_ready: boolean | null;
   overall_score: number | null;
+  retake: boolean;
   matched_image_id: string | null;
   damage: string[];
   missing: string[];

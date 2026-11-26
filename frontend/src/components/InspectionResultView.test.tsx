@@ -13,6 +13,7 @@ const results: InspectionResults = {
   readiness: false,
   guest_ready: null,
   overall_score: null,
+  retake: false,
   images: [
     {
       image_id: "ref_1",
