@@ -43,8 +43,9 @@ def create_inspection(
 ) -> InspectionDetail:
     """Run an inspection synchronously and return it.
 
-    Input problems (no references, invalid images) are rejected with a 4xx and nothing is
-    stored. If a pipeline stage fails after the inspection was created, the inspection is kept
+    Input problems (invalid images) are rejected with a 4xx and nothing is
+    stored. A location with no before photos is checked for guest readiness instead of compared.
+    If a pipeline stage fails after the inspection was created, the inspection is kept
     with `status: "failed"`, `failed_stage` and `error_message` (HTTP 201): the request created
     a resource whose processing failed. The status is never left as "queued" or "processing".
     """

@@ -13,7 +13,7 @@ from app.db.models import Inspection, InspectionImage
 from app.db.session import get_session_factory, reset_db_caches
 from app.main import create_app
 from app.providers.openai_provider import ReviewImage, VisionProviderError
-from app.schemas.review import ChangeMark, ReviewMode, RoomReview
+from app.schemas.review import ChangeMark, GuestIssue, ReviewMode, RoomReview
 from app.services.image_service import ImageService
 from tests.conftest import make_image_bytes
 
@@ -24,6 +24,25 @@ class FakeVision:
     def __init__(self) -> None:
         self.fail = False
         self.calls = 0
+        self.ready_calls = 0
+        self.ready_report = RoomReview(
+            readiness=True,
+            guest_ready=False,
+            overall_score=35,
+            summary="Bed is not made and the sheet is stained.",
+            issues=[
+                GuestIssue(
+                    category="bedding",
+                    severity="critical",
+                    photo_number=1,
+                    comment="Bedsheet is wrinkled and untucked; remake the bed.",
+                    x1=0.12,
+                    y1=0.4,
+                    x2=0.78,
+                    y2=0.82,
+                )
+            ],
+        )
         self.report = RoomReview(
             mode=ReviewMode.BOXES,
             matched_photo=2,
@@ -59,6 +78,13 @@ class FakeVision:
         if self.fail:
             raise VisionProviderError("secret internal detail")
         return self.report
+
+    def check_ready(self, photos: list[ReviewImage]) -> RoomReview:
+        self.ready_calls += 1
+        assert photos
+        if self.fail:
+            raise VisionProviderError("secret internal detail")
+        return self.ready_report
 
 
 def jpeg_bytes(size: tuple[int, int] = (640, 480)) -> bytes:
@@ -213,19 +239,44 @@ def test_database_rows_link_reference_files(api: TestClient) -> None:
         assert ref.storage_key is None and ref.reference_image_id
 
 
-def test_inspection_without_references_is_rejected_and_stores_nothing(
-    api: TestClient, isolated_storage: Path
+def test_inspection_without_references_checks_guest_readiness(
+    api: TestClient, vision: FakeVision, isolated_storage: Path
 ) -> None:
     response = start_inspection(api, [jpeg_bytes()])
-    assert response.status_code == 409
-    assert "reference" in response.json()["detail"].lower()
-    assert count(Inspection) == 0 and stored(isolated_storage, "inspections") == []
+    assert response.status_code == 201
+    detail = response.json()
+    assert detail["status"] == "completed"
+    assert detail["reference_image_count"] == 0 and detail["inspection_image_count"] == 1
+    assert detail["decision"] == "potential_issues"
+    assert vision.calls == 0 and vision.ready_calls == 1
+    assert stored(isolated_storage, "inspections")
+
+    results = api.get(f"/api/v1/inspections/{detail['id']}/results").json()
+    assert results["readiness"] is True and results["guest_ready"] is False
+    assert results["overall_score"] == 35
+    assert results["summary"] == "Bed is not made and the sheet is stained."
+    assert [image["image_id"] for image in results["images"]] == ["new_1"]
+    assert results["boxes"] == [
+        {
+            "image_id": "new_1",
+            "kind": "issue",
+            "description": "Critical: Bedsheet is wrinkled and untucked; remake the bed.",
+            "x1": 0.12,
+            "y1": 0.4,
+            "x2": 0.78,
+            "y2": 0.82,
+            "origin_x": None,
+            "origin_y": None,
+        }
+    ]
 
 
-def test_references_of_another_location_are_not_used(api: TestClient) -> None:
+def test_references_of_another_location_are_not_used(api: TestClient, vision: FakeVision) -> None:
     upload_reference(api, location="kitchen")
     response = start_inspection(api, [jpeg_bytes()], location="garage")
-    assert response.status_code == 409
+    assert response.status_code == 201
+    assert response.json()["reference_image_count"] == 0
+    assert vision.calls == 0 and vision.ready_calls == 1
 
 
 def test_invalid_image_rejected_atomically(

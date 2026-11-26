@@ -43,7 +43,7 @@ class ChangeBox(BaseModel):
     """A described change, placed on one photo. Coordinates are fractions of that photo."""
 
     image_id: str
-    kind: Literal["damage", "missing", "new", "moved"]
+    kind: Literal["damage", "missing", "new", "moved", "issue"]
     description: str
     x1: float
     y1: float
@@ -81,6 +81,9 @@ class InspectionResults(BaseModel):
     failed_stage: str | None = None
     error_message: str | None = None
     mode: Literal["boxes"] = "boxes"
+    readiness: bool = False
+    guest_ready: bool | None = None
+    overall_score: int | None = None
     images: list[InspectionImageOut]
     damage: list[str] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)

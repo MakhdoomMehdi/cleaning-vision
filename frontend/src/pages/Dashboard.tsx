@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import InspectionResultView from "../components/InspectionResultView";
 import InspectionUpload from "../components/InspectionUpload";
 import LocationSelector from "../components/LocationSelector";
@@ -33,6 +33,8 @@ export default function Dashboard() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [results, setResults] = useState<InspectionResults | null>(null);
   const [history, setHistory] = useState<InspectionSummary[]>([]);
+  const [referenceCount, setReferenceCount] = useState(0);
+  const handleReferenceCount = useCallback((count: number) => setReferenceCount(count), []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -113,6 +115,7 @@ export default function Dashboard() {
           propertyId={validPropertyId}
           location={location}
           refreshKey={refreshKey}
+          onCount={handleReferenceCount}
         />
       </Card>
 
@@ -130,12 +133,13 @@ export default function Dashboard() {
           propertyId={validPropertyId}
           location={location}
           locationLabel={locationLabel}
+          hasReferences={referenceCount > 0}
           onComplete={(next) => setResults(next)}
         />
       </Card>
 
       {results && (
-        <Card title="Comparison result">
+        <Card title={results.readiness ? "Guest readiness" : "Comparison result"}>
           <InspectionResultView results={results} />
         </Card>
       )}

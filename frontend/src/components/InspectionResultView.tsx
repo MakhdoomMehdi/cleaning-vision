@@ -94,6 +94,13 @@ function FindingsPhoto({ image, boxes }: { image: InspectionImageResult; boxes: 
   );
 }
 
+function findingText(box: ChangeBox): string {
+  if (box.kind === "issue") {
+    return box.description;
+  }
+  return `${KIND_LABEL[box.kind]}: ${box.description}`;
+}
+
 function FindingList({ boxes }: { boxes: ChangeBox[] }) {
   if (boxes.length === 0) {
     return null;
@@ -102,19 +109,36 @@ function FindingList({ boxes }: { boxes: ChangeBox[] }) {
     <ul className="mt-2 space-y-1 text-sm">
       {boxes.map((box, index) => (
         <li key={`${box.kind}-${index}`} className="font-medium" style={{ color: findingColor(index) }}>
-          {KIND_LABEL[box.kind]}: {box.description}
+          {findingText(box)}
         </li>
       ))}
     </ul>
   );
 }
 
+const READINESS_LABEL: Record<InspectionDecision, string> = {
+  no_issue_detected: "Guest ready",
+  potential_issues: "Not guest ready",
+  inconclusive: "Could not judge this photo",
+  manual_review_required: "Manual review required",
+};
+
 export default function InspectionResultView({ results }: { results: InspectionResults }) {
   const before =
     results.images.find((image) => image.image_id === results.matched_image_id) ??
     results.images.find((image) => image.role === "reference");
-  const after = results.images.find((image) => image.role === "inspection");
-  const boxes = after ? results.boxes.filter((box) => box.image_id === after.image_id) : [];
+  const photos = results.images.filter((image) => image.role === "inspection");
+  const after = photos[0];
+  const headline =
+    results.readiness && results.decision
+      ? results.guest_ready === false
+        ? "Not guest ready"
+        : results.guest_ready === true
+          ? "Guest ready"
+          : READINESS_LABEL[results.decision]
+      : results.decision
+        ? DECISION_LABEL[results.decision]
+        : "Not finished";
 
   return (
     <div className="space-y-4">
@@ -124,22 +148,34 @@ export default function InspectionResultView({ results }: { results: InspectionR
             {results.error_message ?? "The photos could not be compared."}
           </p>
         ) : (
-          <p className="font-medium">
-            {results.decision ? DECISION_LABEL[results.decision] : "Not finished"}
-          </p>
+          <p className="font-medium">{headline}</p>
         )}
         <p className="mt-1 text-neutral-600">
-          Each color matches one finding listed under the photo. A moved item is one box
-          where it is now, and a pin where it used to be.
+          {results.readiness
+            ? "Each color matches one issue listed under the photo."
+            : "Each color matches one finding listed under the photo. A moved item is one box where it is now, and a pin where it used to be."}
         </p>
+        {results.readiness && results.overall_score != null && (
+          <p className="mt-1 text-neutral-700">Score {results.overall_score} out of 100.</p>
+        )}
         {results.summary && <p className="mt-1 text-neutral-700">{results.summary}</p>}
         {results.note && <p className="mt-1 text-neutral-700">{results.note}</p>}
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className={`grid gap-4 ${before ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
         {before && <PlainPhoto image={before} title="Before" />}
-        {after && <PlainPhoto image={after} title="After" />}
-        {after && <FindingsPhoto image={after} boxes={boxes} />}
+        {before && after && <PlainPhoto image={after} title="After" />}
+        {before && after && (
+          <FindingsPhoto image={after} boxes={results.boxes.filter((box) => box.image_id === after.image_id)} />
+        )}
+        {!before &&
+          photos.map((image) => (
+            <FindingsPhoto
+              key={image.image_id}
+              image={image}
+              boxes={results.boxes.filter((box) => box.image_id === image.image_id)}
+            />
+          ))}
       </div>
     </div>
   );

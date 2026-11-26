@@ -168,6 +168,19 @@ def _comparison_images(
 
 
 def _boxes(report: RoomReview) -> list[ChangeBox]:
+    if report.readiness:
+        return [
+            ChangeBox(
+                image_id=f"new_{issue.photo_number}",
+                kind="issue",
+                description=f"{issue.severity.capitalize()}: {issue.comment}",
+                x1=issue.x1,
+                y1=issue.y1,
+                x2=issue.x2,
+                y2=issue.y2,
+            )
+            for issue in report.issues
+        ]
     return [
         ChangeBox(
             image_id=f"{'ref' if mark.side == 'before' else 'new'}_{mark.photo_number}",
@@ -185,6 +198,12 @@ def _boxes(report: RoomReview) -> list[ChangeBox]:
 
 
 def decide(report: RoomReview) -> InspectionDecision:
+    if report.readiness:
+        if not report.could_compare:
+            return InspectionDecision.INCONCLUSIVE
+        if report.guest_ready is False or report.issues:
+            return InspectionDecision.POTENTIAL_ISSUES
+        return InspectionDecision.NO_ISSUE_DETECTED
     if not report.could_compare:
         return InspectionDecision.INCONCLUSIVE
     if report.damage or report.missing or report.new or report.moved:
@@ -206,6 +225,8 @@ def _failure_message(exc: Exception, stage: str) -> str:
     if isinstance(exc, VisionUnavailable):
         return "OPENAI_API_KEY is not set, so the photos could not be compared."
     if isinstance(exc, VisionProviderError):
+        if stage == "readiness":
+            return "The photo could not be checked."
         return "The photos could not be compared."
     if isinstance(exc, StorageError):
         return "A stored image could not be read."
@@ -242,21 +263,53 @@ class InspectionService:
         files: list[UploadedFile],
     ) -> Inspection:
         refs = self._references.list_references(property_id, location)
-        if not refs:
-            raise NoReferencesError(
-                "No reference images are registered for this property and location. "
-                "Upload reference images first."
-            )
         if len(refs) > self._max_reference_images:
             raise TooManyReferencesError(
                 f"This location has {len(refs)} reference images; at most "
                 f"{self._max_reference_images} can be compared in one inspection."
             )
-
         prepared = prepare_uploads(self._images, files)
+        if not refs:
+            inspection = self._persist_inputs(property_id, location, refs, prepared, ReviewMode.BOXES)
+            self._run_readiness(inspection.id)
+            return self._db.get_one(Inspection, inspection.id)
+
         inspection = self._persist_inputs(property_id, location, refs, prepared, ReviewMode.BOXES)
         self._run_pipeline(inspection.id)
         return self._db.get_one(Inspection, inspection.id)
+
+    def _run_readiness(self, inspection_id: str) -> None:
+        stage = "load_images"
+        loaded: dict[str, ValidatedImage] = {}
+        try:
+            rows = [row for row in self._image_rows(inspection_id) if row.role == "inspection"]
+            for row in rows:
+                loaded[row.image_ref] = self._images.validate(self._storage.read(self._key_for(row)))
+            stage = "readiness"
+            if self._vision is None:
+                raise VisionUnavailable()
+            photos = [
+                ReviewImage(caption=f"Photo {index}", image=loaded[row.image_ref].image)
+                for index, row in enumerate(rows, start=1)
+            ]
+            report = self._vision.check_ready(photos)
+            decision = decide(report)
+            inspection = self._db.get_one(Inspection, inspection_id)
+            inspection.comparison = report.model_dump(mode="json")
+            inspection.decision = decision.value
+            inspection.vision_status = VisionStatus.COMPLETED.value
+            inspection.vision_model = self._vision.model_name
+            inspection.vision_error = None
+            inspection.status = InspectionStatus.COMPLETED.value
+            inspection.completed_at = datetime.now(timezone.utc)
+            self._db.commit()
+        except Exception as exc:
+            logger.exception("Inspection %s failed during stage %s", inspection_id, stage)
+            self._db.rollback()
+            self._mark_failed(inspection_id, stage, _failure_message(exc, stage))
+        finally:
+            for item in loaded.values():
+                item.image.close()
 
     def _persist_inputs(self, property_id, location, refs, prepared, mode: ReviewMode) -> Inspection:  # type: ignore[no-untyped-def]
         saved_keys: list[str] = []
@@ -369,10 +422,11 @@ class InspectionService:
         inspection.status = InspectionStatus.FAILED.value
         inspection.failed_stage = stage
         inspection.error_message = message
+        vision_stage = stage in {"review", "readiness"}
         inspection.vision_status = (
-            VisionStatus.SKIPPED.value if stage == "review" and self._vision is None else inspection.vision_status
+            VisionStatus.SKIPPED.value if vision_stage and self._vision is None else inspection.vision_status
         )
-        if stage == "review" and self._vision is not None:
+        if vision_stage and self._vision is not None:
             inspection.vision_status = VisionStatus.FAILED.value
             inspection.vision_model = self._vision.model_name
             inspection.vision_error = message
@@ -454,7 +508,9 @@ class InspectionService:
         change_count = None
         if report is not None:
             change_count = (
-                len(report.damage) + len(report.missing) + len(report.new) + len(report.moved)
+                len(report.issues)
+                if report.readiness
+                else len(report.damage) + len(report.missing) + len(report.new) + len(report.moved)
             )
         return InspectionSummary(
             id=row.id,
@@ -513,6 +569,9 @@ class InspectionService:
             failed_stage=row.failed_stage,
             error_message=row.error_message,
             mode=mode.value,
+            readiness=bool(report and report.readiness),
+            guest_ready=report.guest_ready if report else None,
+            overall_score=report.overall_score if report else None,
             images=_comparison_images(images, matched_image_id),
             damage=report.damage if report else [],
             missing=report.missing if report else [],

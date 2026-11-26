@@ -8,6 +8,7 @@ interface ReferenceGalleryProps {
   location: string;
   /** Change this value to force a reload (e.g. after an upload). */
   refreshKey?: number;
+  onCount?: (count: number) => void;
 }
 
 type GalleryState =
@@ -21,6 +22,7 @@ export default function ReferenceGallery({
   propertyId,
   location,
   refreshKey = 0,
+  onCount,
 }: ReferenceGalleryProps) {
   const [state, setState] = useState<GalleryState>({ kind: "loading" });
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -33,7 +35,10 @@ export default function ReferenceGallery({
 
     const timer = setTimeout(() => {
       listReferences(propertyId, location, controller.signal)
-        .then((data) => setState({ kind: "ready", items: data.items }))
+        .then((data) => {
+          setState({ kind: "ready", items: data.items });
+          onCount?.(data.items.length);
+        })
         .catch((err: unknown) => {
           if (controller.signal.aborted) return;
           const message = err instanceof ApiError ? err.message : "Could not load reference images.";
@@ -45,7 +50,7 @@ export default function ReferenceGallery({
       clearTimeout(timer);
       controller.abort();
     };
-  }, [propertyId, location, refreshKey]);
+  }, [propertyId, location, refreshKey, onCount]);
 
   async function remove(item: ReferenceImage) {
     const confirmed = window.confirm(`Delete ${item.original_filename}? The file will be removed.`);
@@ -54,11 +59,12 @@ export default function ReferenceGallery({
     setDeletingId(item.id);
     try {
       await deleteReference(item.id);
-      setState((current) =>
-        current.kind === "ready"
-          ? { kind: "ready", items: current.items.filter((image) => image.id !== item.id) }
-          : current,
-      );
+      setState((current) => {
+        if (current.kind !== "ready") return current;
+        const items = current.items.filter((image) => image.id !== item.id);
+        onCount?.(items.length);
+        return { kind: "ready", items };
+      });
     } catch (err) {
       const message = err instanceof ApiError ? err.message : "Could not delete that photo.";
       setDeleteError(message);

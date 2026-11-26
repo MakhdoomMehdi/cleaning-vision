@@ -10,7 +10,7 @@ export type VisionStatus = "skipped" | "completed" | "failed";
 
 export interface ChangeBox {
   image_id: string;
-  kind: "damage" | "missing" | "new" | "moved";
+  kind: "damage" | "missing" | "new" | "moved" | "issue";
   description: string;
   x1: number;
   y1: number;
@@ -37,6 +37,9 @@ export interface InspectionResults {
   failed_stage: string | null;
   error_message: string | null;
   images: InspectionImageResult[];
+  readiness: boolean;
+  guest_ready: boolean | null;
+  overall_score: number | null;
   matched_image_id: string | null;
   damage: string[];
   missing: string[];

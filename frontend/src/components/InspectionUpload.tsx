@@ -7,6 +7,7 @@ interface InspectionUploadProps {
   propertyId: string | null;
   location: string;
   locationLabel: string;
+  hasReferences: boolean;
   onComplete: (results: InspectionResults) => void;
 }
 
@@ -19,6 +20,7 @@ export default function InspectionUpload({
   propertyId,
   location,
   locationLabel,
+  hasReferences,
   onComplete,
 }: InspectionUploadProps) {
   const [files, setFiles] = useState<File[]>([]);
@@ -47,8 +49,17 @@ export default function InspectionUpload({
   return (
     <div>
       <p className="mb-3 text-sm text-neutral-600">
-        Upload the <strong>after</strong> photo of the {locationLabel || "room"}. The saved before
-        photos are sent with it. This can take up to a minute.
+        {hasReferences ? (
+          <>
+            Upload the <strong>after</strong> photo of the {locationLabel || "room"}. The saved before
+            photos are sent with it. This can take up to a minute.
+          </>
+        ) : (
+          <>
+            Upload a photo of the {locationLabel || "room"}. There are no before photos, so it is
+            checked for damage and whether it looks ready for the next guest.
+          </>
+        )}
       </p>
       <ImageUploader
         key={uploaderKey}
@@ -66,7 +77,7 @@ export default function InspectionUpload({
         disabled={!canRun}
         className="mt-3 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {running ? "Comparing photos…" : "Compare with reference"}
+        {running ? "Checking photo…" : hasReferences ? "Compare with reference" : "Check guest readiness"}
       </button>
       {!propertyId && (
         <p className="mt-2 text-xs text-neutral-500">Enter a valid property identifier first.</p>

@@ -27,6 +27,19 @@ class ChangeMark(BaseModel):
     origin_y: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class GuestIssue(BaseModel):
+    """Something visibly wrong in a photo that has no before image to compare with."""
+
+    category: Literal["bedding", "cleanliness", "bathroom", "clutter", "damage", "setup"]
+    severity: Literal["critical", "moderate", "minor"]
+    photo_number: int = Field(ge=1, le=12)
+    comment: str
+    x1: float = Field(ge=0.0, le=1.0)
+    y1: float = Field(ge=0.0, le=1.0)
+    x2: float = Field(ge=0.0, le=1.0)
+    y2: float = Field(ge=0.0, le=1.0)
+
+
 class RoomReview(BaseModel):
     mode: ReviewMode = ReviewMode.BOXES
     damage: list[str] = Field(default_factory=list)
@@ -39,3 +52,9 @@ class RoomReview(BaseModel):
     summary: str = ""
     views_compared: str = ""
     could_compare: bool = True
+    # Set when the photo was judged on its own, with no before photos.
+    readiness: bool = False
+    guest_ready: bool | None = None
+    overall_score: int | None = Field(default=None, ge=0, le=100)
+    image_quality_note: str = ""
+    issues: list[GuestIssue] = Field(default_factory=list)

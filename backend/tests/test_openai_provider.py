@@ -5,11 +5,13 @@ from types import SimpleNamespace
 from PIL import Image
 
 from app.providers.openai_provider import (
+    GuestReadyOutput,
     OpenAIVisionProvider,
     ReviewImage,
     _box_instructions,
     _missing_followup_instructions,
     _placement_instructions,
+    _readiness_instructions,
 )
 from app.schemas.review import ChangeMark
 
@@ -154,6 +156,50 @@ def test_failed_followup_keeps_the_pair_result() -> None:
     assert len(responses.calls) == 3
     assert [mark.description for mark in report.marks] == ["lamp moved onto the dresser"]
     assert report.marks[0].x1 == 0.2
+
+
+def test_readiness_check_boxes_what_is_not_guest_ready() -> None:
+    provider, responses = _provider(
+        [
+            GuestReadyOutput(
+                guest_ready=False,
+                overall_score=35,
+                confidence=0.9,
+                summary="Bed is not made and there is a stain.",
+                issues=[
+                    {
+                        "category": "bedding",
+                        "severity": "critical",
+                        "x_min": 0.12,
+                        "y_min": 0.40,
+                        "x_max": 0.78,
+                        "y_max": 0.82,
+                        "comment": "Bedsheet is wrinkled and untucked; remake the bed.",
+                    }
+                ],
+            )
+        ]
+    )
+    report = provider.check_ready([_photo("Photo 1")])
+
+    assert len(responses.calls) == 1
+    assert "ready for an incoming guest" in str(responses.calls[0]["instructions"])
+    assert report.readiness is True and report.guest_ready is False
+    assert report.overall_score == 35
+    assert report.issues[0].comment.startswith("Bedsheet")
+    assert report.issues[0].photo_number == 1
+    assert "no before photo" in _readiness_instructions()
+
+
+def test_unusable_photo_is_not_judged() -> None:
+    provider, _responses = _provider(
+        [GuestReadyOutput(image_quality_note="The photo is too dark to judge.", issues=[])]
+    )
+    report = provider.check_ready([_photo("Photo 1")])
+
+    assert report.readiness is True and report.could_compare is False
+    assert report.issues == []
+    assert "too dark" in report.summary
 
 
 def test_failed_placement_keeps_the_first_boxes() -> None:

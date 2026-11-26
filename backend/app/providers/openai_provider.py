@@ -6,13 +6,13 @@ import base64
 import io
 import logging
 from dataclasses import dataclass
-from typing import Protocol, TypeVar
+from typing import Literal, Protocol, TypeVar
 
 from openai import APIError, APITimeoutError, OpenAI
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from app.schemas.review import ChangeMark, ReviewMode, RoomReview
+from app.schemas.review import ChangeMark, GuestIssue, ReviewMode, RoomReview
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,27 @@ class VisionReviewer(Protocol):
     def model_name(self) -> str: ...
 
     def review(self, before: list[ReviewImage], after: list[ReviewImage]) -> RoomReview: ...
+
+    def check_ready(self, photos: list[ReviewImage]) -> RoomReview: ...
+
+
+class GuestIssueOutput(BaseModel):
+    category: Literal["bedding", "cleanliness", "bathroom", "clutter", "damage", "setup"]
+    severity: Literal["critical", "moderate", "minor"]
+    x_min: float = Field(ge=0.0, le=1.0)
+    y_min: float = Field(ge=0.0, le=1.0)
+    x_max: float = Field(ge=0.0, le=1.0)
+    y_max: float = Field(ge=0.0, le=1.0)
+    comment: str
+
+
+class GuestReadyOutput(BaseModel):
+    guest_ready: bool = False
+    overall_score: int = Field(default=0, ge=0, le=100)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    summary: str = ""
+    image_quality_note: str | None = None
+    issues: list[GuestIssueOutput] = Field(default_factory=list)
 
 
 class BoxedOutput(BaseModel):
@@ -173,6 +194,29 @@ _PAIR_INTRO = (
     "List the objects in the BEFORE photo that are still inside the AFTER frame, "
     "mark each one present, missing, or moved, then put every box on the AFTER photo."
 )
+def _readiness_instructions() -> str:
+    return (
+        "You are a hospitality quality inspector. Decide whether the room in the photo is "
+        "ready for an incoming guest. There is no before photo. Judge only what you see, "
+        "using the standard of a clean, well-kept hotel or rental room.\n"
+        "Check bedding, cleanliness, the bathroom, clutter and leftovers, damage, and setup. "
+        "Report only what is visibly present. Do not guess about anything hidden, cropped, or "
+        "out of frame. If an area looks fine, do not flag it.\n"
+        "If the photo is too dark, blurry, or cropped to judge, set image_quality_note and "
+        "return no issues.\n"
+        "Draw one tight box per distinct issue, on this photo. x_min,y_min is the top-left "
+        "and x_max,y_max is the bottom-right, each a fraction from 0 to 1. A box must cover "
+        "the problem itself, not the area beside it. For a large uncleaned area, box the "
+        "whole affected area.\n"
+        "comment says what is wrong and what is needed, in one short sentence, such as "
+        "'Bedsheet is wrinkled and untucked; remake the bed.'\n"
+        "severity is critical when the room is clearly not guest-ready, moderate when it "
+        "needs fixing before arrival, and minor for a small touch-up.\n"
+        "guest_ready is false when there is any critical issue or two or more moderate issues. "
+        "If there are no issues, guest_ready is true and issues is empty."
+    )
+
+
 _MISSING_INTRO = (
     "The first look found no missing items. "
     "Look again for objects that are in the BEFORE photo and gone from the AFTER photo. "
@@ -229,6 +273,77 @@ class OpenAIVisionProvider:
         if report.could_compare and report.marks:
             report = self._place_marks(report, focused, after)
         return report
+
+    def check_ready(self, photos: list[ReviewImage]) -> RoomReview:
+        if not photos:
+            return RoomReview(
+                readiness=True,
+                could_compare=False,
+                summary="A photo of the room is required.",
+            )
+        issues: list[GuestIssue] = []
+        summaries: list[str] = []
+        notes: list[str] = []
+        scores: list[int] = []
+        for index, photo in enumerate(photos, start=1):
+            parsed = self._parse(
+                instructions=_readiness_instructions(),
+                content=_message(
+                    [],
+                    [photo],
+                    intro="Judge this photo on its own. There is no before photo.",
+                    before_detail="high",
+                    after_detail="high",
+                    quality=90,
+                ),
+                text_format=GuestReadyOutput,
+            )
+            note = " ".join((parsed.image_quality_note or "").split())
+            if note and not parsed.issues:
+                notes.append(note)
+                continue
+            scores.append(parsed.overall_score)
+            summary = " ".join(parsed.summary.split())
+            if summary:
+                summaries.append(summary)
+            for issue in parsed.issues:
+                comment = " ".join(issue.comment.split())
+                if not comment:
+                    continue
+                x1, x2 = sorted((issue.x_min, issue.x_max))
+                y1, y2 = sorted((issue.y_min, issue.y_max))
+                if x2 - x1 < 0.01 or y2 - y1 < 0.01:
+                    continue
+                issues.append(
+                    GuestIssue(
+                        category=issue.category,
+                        severity=issue.severity,
+                        photo_number=index,
+                        comment=comment[:300],
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
+                    )
+                )
+        if not scores and not issues:
+            return RoomReview(
+                readiness=True,
+                could_compare=False,
+                summary=notes[0] if notes else "The photo is not clear enough to judge.",
+                image_quality_note=notes[0] if notes else "",
+            )
+        critical = sum(1 for issue in issues if issue.severity == "critical")
+        moderate = sum(1 for issue in issues if issue.severity == "moderate")
+        return RoomReview(
+            readiness=True,
+            could_compare=True,
+            guest_ready=critical == 0 and moderate < 2,
+            overall_score=min(scores) if scores else 0,
+            summary=" ".join(summaries)[:1000],
+            image_quality_note=notes[0] if notes else "",
+            issues=issues[:12],
+        )
 
     def _matched_photo(self, before: list[ReviewImage], after: list[ReviewImage]) -> int:
         if len(before) == 1:

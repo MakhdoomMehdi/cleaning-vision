@@ -63,8 +63,9 @@ synchronously and returns `201`. The result is `completed` or `failed` when the 
 | `GET /api/v1/inspections/{id}/images/{ref_N\|new_N}` | A stored before or after image |
 
 The before pool for one inspection is capped by `MAX_REFERENCE_IMAGES_PER_INSPECTION` (default
-12). More than that is rejected, not silently dropped. A location with no before photos returns
-`409`.
+12). More than that is rejected, not silently dropped. A location with no before photos is
+checked on its own for guest readiness: damage, cleanliness, and anything that is not ready
+for the next guest, each with a box and a comment.
 
 ## Tests
 

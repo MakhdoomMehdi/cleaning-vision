@@ -10,6 +10,9 @@ const results: InspectionResults = {
   status: "completed",
   failed_stage: null,
   error_message: null,
+  readiness: false,
+  guest_ready: null,
+  overall_score: null,
   images: [
     {
       image_id: "ref_1",
